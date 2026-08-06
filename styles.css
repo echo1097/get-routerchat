@@ -48,39 +48,3 @@ p {
   line-height: 1.6;
   text-wrap: pretty;
 }
-
-a {
-  min-height: 44px;
-  margin-top: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 20px;
-  border-radius: 12px;
-  background: #f5f5f5;
-  color: #090909;
-  font-weight: 650;
-  text-decoration: none;
-  transition-property: background-color, color, transform, box-shadow;
-  transition-duration: 140ms;
-  transition-timing-function: ease-out;
-}
-
-a:hover {
-  background: #d4d4d4;
-}
-
-a:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 4px rgb(255 255 255 / 22%);
-}
-
-a:active {
-  transform: scale(0.96);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  a {
-    transition-duration: 0.01ms;
-  }
-}
