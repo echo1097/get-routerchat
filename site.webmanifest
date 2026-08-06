@@ -1,0 +1,21 @@
+{
+  "name": "RouterChat",
+  "short_name": "RouterChat",
+  "start_url": "/get-routerchat/",
+  "scope": "/get-routerchat/",
+  "icons": [
+    {
+      "src": "/get-routerchat/favicon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/get-routerchat/favicon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#090909",
+  "background_color": "#090909",
+  "display": "standalone"
+}
