@@ -13,6 +13,7 @@ $keptBackups = 3
 
 $installRoot = Join-Path $env:LOCALAPPDATA 'RouterChat'
 $appDir = Join-Path $installRoot 'app'
+$previousApp = Join-Path $installRoot 'app.previous'
 $runtimeDir = Join-Path $installRoot 'runtime'
 $userDataDir = Join-Path $installRoot 'user-data'
 $backupsDir = Join-Path $installRoot 'backups'
@@ -23,6 +24,7 @@ $uvBin = Join-Path $runtimeDir 'tools\uv.exe'
 
 $script:logFile = $null
 $script:workDir = $null
+$script:installFailed = $false
 
 function Write-Step {
     param([string] $Message)
@@ -199,16 +201,30 @@ function Sync-PrivateEnvironment {
             Remove-Item -LiteralPath $venvDir -Recurse -Force
         }
 
-        Invoke-PrivateTool `
-            -Arguments @('venv', '--python', $pythonVersion, '--managed-python', $venvDir) `
-            -FailureMessage 'The private environment could not be created.'
+        try {
+            Invoke-PrivateTool `
+                -Arguments @('venv', '--python', $pythonVersion, '--managed-python', $venvDir) `
+                -FailureMessage 'The private environment could not be created.'
+        }
+        catch {
+            $failure = $_
+            Restore-Application
+            throw $failure
+        }
     }
 
     Write-Step "Installing RouterChat's dependencies."
 
-    Invoke-PrivateTool `
-        -Arguments @('pip', 'sync', '--python', $venvPython, (Join-Path $appDir 'requirements.lock')) `
-        -FailureMessage 'The RouterChat dependencies could not be installed.'
+    try {
+        Invoke-PrivateTool `
+            -Arguments @('pip', 'sync', '--python', $venvPython, (Join-Path $appDir 'requirements.lock')) `
+            -FailureMessage 'The RouterChat dependencies could not be installed.'
+    }
+    catch {
+        $failure = $_
+        Restore-Application
+        throw $failure
+    }
 }
 
 function Backup-UserData {
@@ -244,7 +260,10 @@ function Install-Application {
     Write-Step "Installing RouterChat $Version."
 
     $stageDir = Join-Path $script:workDir 'app'
-    $previousApp = Join-Path $installRoot 'app.previous'
+
+    if (-not (Test-Path -LiteralPath $appDir) -and (Test-Path -LiteralPath $previousApp)) {
+        Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+    }
 
     if (Test-Path -LiteralPath $previousApp) {
         Remove-Item -LiteralPath $previousApp -Recurse -Force
@@ -262,16 +281,38 @@ function Install-Application {
             Copy-Item -LiteralPath $stageDir -Destination $appDir -Recurse -Force
         }
         catch {
-            if (Test-Path -LiteralPath $appDir) {
-                Remove-Item -LiteralPath $appDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            if (Test-Path -LiteralPath $previousApp) {
-                Move-Item -LiteralPath $previousApp -Destination $appDir -Force
-            }
+            Restore-Application
             throw 'The new RouterChat files could not be installed.'
         }
     }
+}
 
+function Restore-Application {
+    if (-not (Test-Path -LiteralPath $previousApp)) {
+        return
+    }
+
+    if (Test-Path -LiteralPath $appDir) {
+        Remove-Item -LiteralPath $appDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+    Write-Step 'Restored the previous RouterChat application files.'
+
+    $restoredLock = Join-Path $appDir 'requirements.lock'
+    if ((Test-Path -LiteralPath $venvPython) -and (Test-Path -LiteralPath $restoredLock)) {
+        try {
+            Invoke-PrivateTool `
+                -Arguments @('pip', 'sync', '--python', $venvPython, $restoredLock) `
+                -FailureMessage 'The previous dependencies could not be restored.'
+        }
+        catch {
+            Write-Step 'The previous dependencies could not be restored. Rerun the installer to repair RouterChat.'
+        }
+    }
+}
+
+function Remove-PreviousApplication {
     if (Test-Path -LiteralPath $previousApp) {
         Remove-Item -LiteralPath $previousApp -Recurse -Force
     }
@@ -436,12 +477,18 @@ finally {
 '@
 
     $updateScript = @"
-`$ErrorActionPreference = 'Stop'
 `$ProgressPreference = 'SilentlyContinue'
 
 Write-Host 'Checking for a newer version of RouterChat.'
-Invoke-RestMethod -Uri '$installerUrl' -UseBasicParsing | Invoke-Expression
+
+& powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '$installerUrl' | iex"
+
+if (`$LASTEXITCODE -ne 0) {
+    Write-Host 'RouterChat could not be updated. Your existing installation was left in place.'
+}
+
 Read-Host 'Press Enter to close this window'
+exit `$LASTEXITCODE
 "@
 
     $startCommand = @'
@@ -558,14 +605,18 @@ try {
     Backup-UserData
     Install-Application -Version $newVersion
     Sync-PrivateEnvironment
+    Remove-PreviousApplication
     Write-InstallMetadata -Version $newVersion -Platform $platformName
     Write-Launchers
     New-StartMenuShortcuts
     Start-Routerchat
 
     Write-Step "Done. Start RouterChat later from the Start Menu or 'Start RouterChat.cmd' in $installRoot"
+    $script:installFailed = $false
 }
 catch {
+    $script:installFailed = $true
+
     Write-Host "RouterChat installation failed: $($_.Exception.Message)"
     if ($script:logFile) {
         Add-Content -LiteralPath $script:logFile -Value "RouterChat installation failed: $($_.Exception.Message)" -Encoding utf8
@@ -577,3 +628,9 @@ finally {
         Remove-Item -LiteralPath $script:workDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+if ($script:installFailed) {
+    exit 1
+}
+
+exit 0

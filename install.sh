@@ -12,6 +12,7 @@ keptBackups="3"
 
 installRoot="$HOME/Library/Application Support/RouterChat"
 appDir="$installRoot/app"
+previousApp="$installRoot/app.previous"
 runtimeDir="$installRoot/runtime"
 userDataDir="$installRoot/user-data"
 backupsDir="$installRoot/backups"
@@ -179,13 +180,17 @@ syncEnvironment() {
     if [ ! -x "$venvPython" ]; then
         say "Creating RouterChat's private environment."
         rm -rf "$venvDir"
-        "$uvBin" venv --python "$pythonVersion" --managed-python "$venvDir" >>"$logFile" 2>&1 \
-            || fail "the private environment could not be created"
+        if ! "$uvBin" venv --python "$pythonVersion" --managed-python "$venvDir" >>"$logFile" 2>&1; then
+            restoreApplication
+            fail "the private environment could not be created"
+        fi
     fi
 
     say "Installing RouterChat's dependencies."
-    "$uvBin" pip sync --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1 \
-        || fail "the RouterChat dependencies could not be installed"
+    if ! "$uvBin" pip sync --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1; then
+        restoreApplication
+        fail "the RouterChat dependencies could not be installed"
+    fi
 }
 
 backupUserData() {
@@ -215,19 +220,36 @@ trimBackups() {
 installApplication() {
     say "Installing RouterChat $newVersion."
 
-    previousApp="$installRoot/app.previous"
+    if [ ! -d "$appDir" ] && [ -d "$previousApp" ]; then
+        mv "$previousApp" "$appDir"
+    fi
+
     rm -rf "$previousApp"
 
     if [ -d "$appDir" ]; then
         mv "$appDir" "$previousApp"
     fi
 
-    if mv "$workDir/app" "$appDir"; then
-        rm -rf "$previousApp"
-    else
-        [ -d "$previousApp" ] && mv "$previousApp" "$appDir"
+    if ! mv "$workDir/app" "$appDir"; then
+        restoreApplication
         fail "the new RouterChat files could not be installed"
     fi
+}
+
+restoreApplication() {
+    [ -d "$previousApp" ] || return 0
+
+    rm -rf "$appDir"
+    mv "$previousApp" "$appDir"
+    say "Restored the previous RouterChat application files."
+
+    if [ -x "$venvPython" ] && [ -f "$appDir/requirements.lock" ]; then
+        "$uvBin" pip sync --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1 || true
+    fi
+}
+
+discardPreviousApplication() {
+    rm -rf "$previousApp"
 }
 
 writeInstallMetadata() {
@@ -355,7 +377,13 @@ LAUNCHER
 set -eu
 
 printf 'Checking for a newer version of RouterChat.\n'
-curl -fsSL --proto '=https' --tlsv1.2 "$installerUrl" | sh
+
+if curl -fsSL --proto '=https' --tlsv1.2 "$installerUrl" | sh; then
+    exit 0
+fi
+
+printf 'RouterChat could not be updated. Your existing installation was left in place.\n' >&2
+exit 1
 UPDATER
 
     chmod 755 "$installRoot/Start RouterChat.command" "$installRoot/Update RouterChat.command"
@@ -424,6 +452,7 @@ main() {
     backupUserData
     installApplication
     syncEnvironment
+    discardPreviousApplication
     writeInstallMetadata
     writeLaunchers
     createAliases
