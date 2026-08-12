@@ -4,7 +4,6 @@ $ProgressPreference = 'SilentlyContinue'
 $appRepo = 'echo1097/routerchat'
 $appZipUrl = "https://github.com/$appRepo/releases/latest/download/routerchat-app.zip"
 $appChecksumUrl = "https://github.com/$appRepo/releases/latest/download/routerchat-app.zip.sha256"
-$installerUrl = 'https://echo1097.github.io/get-routerchat/install.ps1'
 $uvVersion = '0.7.19'
 $pythonVersion = '3.13'
 $routerchatPort = 8000
@@ -14,6 +13,7 @@ $keptBackups = 3
 $installRoot = Join-Path $env:LOCALAPPDATA 'RouterChat'
 $appDir = Join-Path $installRoot 'app'
 $previousApp = Join-Path $installRoot 'app.previous'
+$transactionPath = Join-Path $installRoot 'install.transaction'
 $runtimeDir = Join-Path $installRoot 'runtime'
 $userDataDir = Join-Path $installRoot 'user-data'
 $backupsDir = Join-Path $installRoot 'backups'
@@ -25,6 +25,14 @@ $uvBin = Join-Path $runtimeDir 'tools\uv.exe'
 $script:logFile = $null
 $script:workDir = $null
 $script:installFailed = $false
+$script:startFailed = $false
+$script:wasRunning = $false
+$script:startupLog = $null
+$script:backupDir = $null
+$script:hadEnv = $false
+$script:hadDatabase = $false
+$script:previousVersion = $null
+$script:transactionStarted = $false
 
 function Write-Step {
     param([string] $Message)
@@ -122,6 +130,13 @@ function Get-RouterchatPackage {
     Get-RemoteFile -Url $appChecksumUrl -Destination $checksumPath
     Confirm-Checksum -FilePath $zipPath -ChecksumPath $checksumPath
 
+    if ($env:ROUTERCHAT_EXPECTED_APP_SHA256) {
+        $downloadedSum = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+        if ($downloadedSum -ne $env:ROUTERCHAT_EXPECTED_APP_SHA256) {
+            throw 'The latest release changed after the updater validated it. Run the update again.'
+        }
+    }
+
     $stageDir = Join-Path $script:workDir 'app'
     Expand-Archive -LiteralPath $zipPath -DestinationPath $stageDir -Force
 
@@ -135,6 +150,10 @@ function Get-RouterchatPackage {
 
     if ([string]::IsNullOrWhiteSpace($metadata.version)) {
         throw 'The downloaded package has no readable version.'
+    }
+
+    if ($env:ROUTERCHAT_EXPECTED_VERSION -and $metadata.version -ne $env:ROUTERCHAT_EXPECTED_VERSION) {
+        throw 'The latest release version changed after the updater validated it. Run the update again.'
     }
 
     return $metadata.version
@@ -231,27 +250,148 @@ function Backup-UserData {
     $databasePath = Join-Path $userDataDir 'routerchat.sqlite3'
     $envPath = Join-Path $userDataDir '.env'
 
-    if (-not (Test-Path -LiteralPath $databasePath) -and -not (Test-Path -LiteralPath $envPath)) {
+    $script:backupDir = $null
+    $script:hadEnv = Test-Path -LiteralPath $envPath
+    $script:hadDatabase = Test-Path -LiteralPath $databasePath
+
+    if (-not $script:hadDatabase -and -not $script:hadEnv -and -not (Test-Path -LiteralPath $appDir)) {
         return
     }
 
-    $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
-    $backupDir = Join-Path $backupsDir $stamp
-    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss') + "-$PID"
+    $script:backupDir = Join-Path $backupsDir $stamp
+    New-Item -ItemType Directory -Path $script:backupDir | Out-Null
 
     foreach ($sourcePath in @($envPath, $databasePath)) {
         if (Test-Path -LiteralPath $sourcePath) {
-            Copy-Item -LiteralPath $sourcePath -Destination $backupDir -Force
+            Copy-Item -LiteralPath $sourcePath -Destination $script:backupDir -Force
         }
     }
 
     Write-Step 'Saved a backup of your existing RouterChat data.'
 
     Get-ChildItem -LiteralPath $backupsDir -Directory |
-        Where-Object { $_.Name -match '^\d{8}-\d{6}$' } |
+        Where-Object { $_.Name -match '^\d{8}-\d{6}(?:-\d+)?$' } |
         Sort-Object Name -Descending |
         Select-Object -Skip $keptBackups |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+}
+
+function Restore-UserData {
+    if (-not $script:backupDir -or -not (Test-Path -LiteralPath $script:backupDir)) {
+        return
+    }
+
+    $databasePath = Join-Path $userDataDir 'routerchat.sqlite3'
+    $envPath = Join-Path $userDataDir '.env'
+
+    foreach ($sidecarPath in @("$databasePath-wal", "$databasePath-shm")) {
+        Remove-Item -LiteralPath $sidecarPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($script:hadEnv) {
+        $temporaryEnv = "$envPath.restore"
+        Copy-Item -LiteralPath (Join-Path $script:backupDir '.env') -Destination $temporaryEnv -Force
+        Move-Item -LiteralPath $temporaryEnv -Destination $envPath -Force
+    }
+    else {
+        Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($script:hadDatabase) {
+        $temporaryDatabase = "$databasePath.restore"
+        Copy-Item -LiteralPath (Join-Path $script:backupDir 'routerchat.sqlite3') -Destination $temporaryDatabase -Force
+        Move-Item -LiteralPath $temporaryDatabase -Destination $databasePath -Force
+    }
+    else {
+        Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Step 'Restored the previous RouterChat user data.'
+}
+
+function Set-LatestBackupSnapshot {
+    $latestBackup = Get-ChildItem -LiteralPath $backupsDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}-\d{6}(?:-\d+)?$' } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+
+    if (-not $latestBackup) {
+        return $false
+    }
+
+    $script:backupDir = $latestBackup.FullName
+    $script:hadEnv = Test-Path -LiteralPath (Join-Path $script:backupDir '.env')
+    $script:hadDatabase = Test-Path -LiteralPath (Join-Path $script:backupDir 'routerchat.sqlite3')
+    return $true
+}
+
+function Get-FileVersion {
+    param([string] $VersionPath)
+
+    if (-not (Test-Path -LiteralPath $VersionPath)) {
+        return $null
+    }
+
+    try {
+        return [string] ((Get-Content -LiteralPath $VersionPath -Raw | ConvertFrom-Json).version)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Restore-InterruptedUserData {
+    if (Set-LatestBackupSnapshot) {
+        Restore-UserData
+    }
+}
+
+function Repair-InterruptedInstallation {
+    if (-not (Test-Path -LiteralPath $previousApp)) {
+        Remove-Item -LiteralPath $transactionPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $appDir)) {
+        Restore-InterruptedUserData
+        Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+        Remove-Item -LiteralPath $transactionPath -Force -ErrorAction SilentlyContinue
+        Write-Step 'Recovered the previous RouterChat version after an interrupted update.'
+        return
+    }
+
+    if (Test-Path -LiteralPath $transactionPath) {
+        Restore-InterruptedUserData
+        Remove-Item -LiteralPath $appDir -Recurse -Force
+        Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+        Remove-Item -LiteralPath $transactionPath -Force -ErrorAction SilentlyContinue
+        Write-Step 'Rolled back an interrupted RouterChat update.'
+        return
+    }
+
+    $appVersion = Get-FileVersion (Join-Path $appDir 'version.json')
+    $metadataVersion = $null
+    $metadataPath = Join-Path $installRoot 'install.json'
+    if (Test-Path -LiteralPath $metadataPath) {
+        try {
+            $metadataVersion = [string] ((Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json).installedVersion)
+        }
+        catch {
+            $metadataVersion = $null
+        }
+    }
+
+    if ($appVersion -and $appVersion -eq $metadataVersion) {
+        Remove-Item -LiteralPath $previousApp -Recurse -Force
+        Write-Step 'Finished cleanup from the previous RouterChat update.'
+        return
+    }
+
+    Restore-InterruptedUserData
+    Remove-Item -LiteralPath $appDir -Recurse -Force
+    Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+    Write-Step 'Rolled back an interrupted RouterChat update.'
 }
 
 function Install-Application {
@@ -263,6 +403,17 @@ function Install-Application {
 
     if (-not (Test-Path -LiteralPath $appDir) -and (Test-Path -LiteralPath $previousApp)) {
         Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+    }
+
+    $script:previousVersion = $null
+    $previousVersionPath = Join-Path $appDir 'version.json'
+    if (Test-Path -LiteralPath $previousVersionPath) {
+        try {
+            $script:previousVersion = [string] ((Get-Content -LiteralPath $previousVersionPath -Raw | ConvertFrom-Json).version)
+        }
+        catch {
+            $script:previousVersion = $null
+        }
     }
 
     if (Test-Path -LiteralPath $previousApp) {
@@ -297,6 +448,8 @@ function Restore-Application {
     }
 
     Move-Item -LiteralPath $previousApp -Destination $appDir -Force
+    Restore-UserData
+    Remove-Item -LiteralPath $transactionPath -Force -ErrorAction SilentlyContinue
     Write-Step 'Restored the previous RouterChat application files.'
 
     $restoredLock = Join-Path $appDir 'requirements.lock'
@@ -310,12 +463,22 @@ function Restore-Application {
             Write-Step 'The previous dependencies could not be restored. Rerun the installer to repair RouterChat.'
         }
     }
+
+    Restart-PreviousInstance
 }
 
 function Remove-PreviousApplication {
     if (Test-Path -LiteralPath $previousApp) {
         Remove-Item -LiteralPath $previousApp -Recurse -Force
     }
+}
+
+function Start-InstallTransaction {
+    Set-Content -LiteralPath $transactionPath -Value $script:newVersion -Encoding ascii
+}
+
+function Complete-InstallTransaction {
+    Remove-Item -LiteralPath $transactionPath -Force
 }
 
 function Write-InstallMetadata {
@@ -414,7 +577,12 @@ $logFile = Join-Path $logsDir "launcher-$stamp.log"
 
 if (Test-RouterchatHealthy) {
     Write-Host 'RouterChat is already running. Opening it in your browser.'
-    Start-Process $routerchatUrl
+    try {
+        Start-Process $routerchatUrl
+    }
+    catch {
+        Write-Host "RouterChat is ready at $routerchatUrl, but the browser could not be opened automatically."
+    }
     exit 0
 }
 
@@ -435,7 +603,13 @@ $server = Start-Process -FilePath $venvPython `
     -NoNewWindow `
     -PassThru
 
-Set-Content -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Value $server.Id -Encoding utf8
+try {
+    Set-Content -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Value $server.Id -Encoding utf8
+}
+catch {
+    Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+    throw
+}
 
 Write-Host 'Starting RouterChat.'
 $ready = $false
@@ -460,7 +634,12 @@ if (-not $ready) {
     exit 1
 }
 
-Start-Process $routerchatUrl
+try {
+    Start-Process $routerchatUrl
+}
+catch {
+    Write-Host "RouterChat is ready at $routerchatUrl, but the browser could not be opened automatically."
+}
 
 Write-Host "RouterChat is running at $routerchatUrl"
 Write-Host 'Closing this window stops RouterChat.'
@@ -476,20 +655,47 @@ finally {
 }
 '@
 
-    $updateScript = @"
-`$ProgressPreference = 'SilentlyContinue'
+    $updateScript = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 Write-Host 'Checking for a newer version of RouterChat.'
 
-& powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '$installerUrl' | iex"
+$updateUrl = 'https://echo1097.github.io/get-routerchat/updater/update.ps1'
+$checksumsUrl = 'https://echo1097.github.io/get-routerchat/updater/checksums.txt'
+$workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("routerchat-updater-bootstrap-" + [System.Guid]::NewGuid().ToString('N'))
+$exitCode = 1
 
-if (`$LASTEXITCODE -ne 0) {
-    Write-Host 'RouterChat could not be updated. Your existing installation was left in place.'
+try {
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    $updatePath = Join-Path $workDir 'update.ps1'
+    $checksumsPath = Join-Path $workDir 'checksums.txt'
+
+    Invoke-WebRequest -Uri $updateUrl -OutFile $updatePath -UseBasicParsing -MaximumRedirection 5
+    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing -MaximumRedirection 5
+
+    $checksumLine = Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match '\supdate\.ps1$' } | Select-Object -First 1
+    $expectedSum = ($checksumLine -split '\s+')[0]
+    $actualSum = (Get-FileHash -LiteralPath $updatePath -Algorithm SHA256).Hash
+
+    if ($expectedSum -notmatch '^[0-9a-fA-F]{64}$' -or $expectedSum -ne $actualSum) {
+        throw 'RouterChat could not verify the updater, so nothing was changed.'
+    }
+
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $updatePath -InstallRoot $PSScriptRoot
+    $exitCode = $LASTEXITCODE
+}
+catch {
+    Write-Host "RouterChat could not be updated: $($_.Exception.Message)"
+    $exitCode = 1
+}
+finally {
+    Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Read-Host 'Press Enter to close this window'
-exit `$LASTEXITCODE
-"@
+exit $exitCode
+'@
 
     $startCommand = @'
 @echo off
@@ -531,69 +737,210 @@ function New-StartMenuShortcuts {
     }
 }
 
-function Start-Routerchat {
-    Write-Step 'Starting RouterChat.'
-
-    $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd-HHmmss')
-    $startupLog = Join-Path $logsDir "launcher-$stamp.log"
-
-    $alreadyHealthy = $false
+function Get-RunningVersion {
     try {
         $response = Invoke-RestMethod -Uri "$routerchatUrl/api/health" -TimeoutSec 2 -UseBasicParsing
-        $alreadyHealthy = [bool] $response.ok
+        if ($response.ok) {
+            return [string] $response.version
+        }
     }
     catch {
-        $alreadyHealthy = $false
     }
 
-    if (-not $alreadyHealthy) {
-        $portOwner = $null
-        try {
-            $portOwner = Get-NetTCPConnection -LocalPort $routerchatPort -State Listen -ErrorAction Stop
-        }
-        catch {
-            $portOwner = $null
-        }
+    return $null
+}
 
-        if ($portOwner) {
-            Write-Step "Port $routerchatPort is used by another program, so RouterChat was installed but not started."
-            return
-        }
+function Test-PortInUse {
+    try {
+        return [bool] (Get-NetTCPConnection -LocalPort $routerchatPort -State Listen -ErrorAction Stop)
+    }
+    catch {
+        return $false
+    }
+}
 
-        $env:ROUTERCHAT_USER_DATA_DIR = $userDataDir
-
-        $server = Start-Process -FilePath $venvPython `
-            -ArgumentList @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort") `
-            -WorkingDirectory $appDir `
-            -RedirectStandardOutput $startupLog `
-            -RedirectStandardError "$startupLog.error" `
-            -WindowStyle Hidden `
-            -PassThru
-
-        Set-Content -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Value $server.Id -Encoding utf8
+function Get-OwnedProcess {
+    $pidFile = Join-Path $logsDir 'routerchat.pid'
+    if (-not (Test-Path -LiteralPath $pidFile)) {
+        return $null
     }
 
-    for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        try {
-            $response = Invoke-RestMethod -Uri "$routerchatUrl/api/health" -TimeoutSec 2 -UseBasicParsing
-            if ($response.ok) {
-                Start-Process $routerchatUrl
-                Write-Step "RouterChat is ready at $routerchatUrl"
-                return
-            }
+    $recordedLine = Get-Content -LiteralPath $pidFile -TotalCount 1
+    if ([string]::IsNullOrWhiteSpace($recordedLine)) {
+        return $null
+    }
+
+    $recordedId = 0
+    if (-not [int]::TryParse($recordedLine.Trim(), [ref] $recordedId)) {
+        return $null
+    }
+
+    $process = Get-Process -Id $recordedId -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $null
+    }
+
+    try {
+        $details = Get-CimInstance Win32_Process -Filter "ProcessId = $recordedId" -ErrorAction Stop
+        if (-not $details.CommandLine -or -not $details.CommandLine.Contains($venvDir)) {
+            return $null
         }
-        catch {
+    }
+    catch {
+        return $null
+    }
+
+    return $process
+}
+
+function Stop-OwnedInstance {
+    $process = Get-OwnedProcess
+    if (-not $process) {
+        return $false
+    }
+
+    Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
+
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        if ($process.HasExited -and -not (Test-PortInUse)) {
+            Remove-Item -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Force -ErrorAction SilentlyContinue
+            return $true
         }
         Start-Sleep -Seconds 1
     }
 
-    Write-Step "RouterChat was installed but did not start in time. Use 'Start RouterChat.cmd' and check $startupLog"
+    return $false
+}
+
+function Stop-RunningInstance {
+    $script:wasRunning = $false
+
+    $runningVersion = Get-RunningVersion
+    $ownedProcess = Get-OwnedProcess
+    if (-not $runningVersion -and -not $ownedProcess) {
+        return
+    }
+
+    $script:wasRunning = $true
+    Write-Step 'Stopping the running RouterChat so it can be updated safely.'
+
+    if (-not (Stop-OwnedInstance)) {
+        throw 'RouterChat is running but was not started by this installation. Close it, then run the installer again.'
+    }
+}
+
+function Start-Backend {
+    $env:ROUTERCHAT_USER_DATA_DIR = $userDataDir
+
+    $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd-HHmmss')
+    $script:startupLog = Join-Path $logsDir "launcher-$stamp.log"
+
+    $server = Start-Process -FilePath $venvPython `
+        -ArgumentList @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort") `
+        -WorkingDirectory $appDir `
+        -RedirectStandardOutput $script:startupLog `
+        -RedirectStandardError "$($script:startupLog).error" `
+        -WindowStyle Hidden `
+        -PassThru
+
+    try {
+        Set-Content -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Value $server.Id -Encoding utf8
+    }
+    catch {
+        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Restart-PreviousInstance {
+    if (-not $script:wasRunning) {
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $venvPython) -or -not (Test-Path -LiteralPath (Join-Path $appDir 'backend\main.py'))) {
+        return
+    }
+
+    if (Test-PortInUse) {
+        Write-Step "The previous RouterChat version was restored but port $routerchatPort is busy, so it could not be restarted."
+        return
+    }
+
+    try {
+        Start-Backend
+    }
+    catch {
+        Write-Step 'The previous RouterChat version was restored but could not be restarted. Use Start RouterChat.cmd to try again.'
+        return
+    }
+
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        $restoredVersion = Get-RunningVersion
+        if ($restoredVersion -and (-not $script:previousVersion -or $restoredVersion -eq $script:previousVersion)) {
+            Write-Step 'Restarted the RouterChat version that was running before.'
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    Stop-OwnedInstance | Out-Null
+    Write-Step "The previous RouterChat version was restored but could not be restarted. Use 'Start RouterChat.cmd' to try again."
+}
+
+function Start-Routerchat {
+    param([string] $Version, [string] $Platform)
+
+    Write-Step "Starting RouterChat $Version."
+
+    if (Test-PortInUse) {
+        if (Test-Path -LiteralPath $previousApp) {
+            Restore-Application
+            throw "Port $routerchatPort is used by another program. The previous RouterChat version was restored."
+        }
+
+        Write-InstallMetadata -Version $Version -Platform $Platform
+        $script:startFailed = $true
+        throw "Port $routerchatPort is used by another program. Close it, then use 'Start RouterChat.cmd'."
+    }
+
+    try {
+        Start-Backend
+    }
+    catch {
+        Write-Step "RouterChat $Version could not create its backend process, so the previous version is being restored."
+        Restore-Application
+        throw 'The RouterChat backend process could not be started.'
+    }
+
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        if ((Get-RunningVersion) -eq $Version) {
+            try {
+                Start-Process $routerchatUrl
+            }
+            catch {
+                Write-Step 'RouterChat is ready, but the browser could not be opened automatically.'
+            }
+            Write-Step "RouterChat $Version is ready at $routerchatUrl"
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    Stop-OwnedInstance | Out-Null
+
+    Write-Step "RouterChat $Version did not start, so the previous version is being restored."
+
+    $failedLog = $script:startupLog
+    Restore-Application
+
+    throw "The new version did not start in time. The previous version was restored. See $failedLog"
 }
 
 try {
     $platformName = Test-SupportedPlatform
     Test-InstallRoot
     New-InstallDirectories
+    Repair-InterruptedInstallation
 
     $script:workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("routerchat-install-" + [System.Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:workDir -Force | Out-Null
@@ -601,15 +948,27 @@ try {
     Write-Step "Installing RouterChat for $platformName into $installRoot"
 
     $newVersion = Get-RouterchatPackage
+    $script:newVersion = $newVersion
     Install-PrivateRuntime
+    Stop-RunningInstance
+    $script:transactionStarted = $true
     Backup-UserData
+    Start-InstallTransaction
     Install-Application -Version $newVersion
     Sync-PrivateEnvironment
-    Remove-PreviousApplication
-    Write-InstallMetadata -Version $newVersion -Platform $platformName
     Write-Launchers
     New-StartMenuShortcuts
-    Start-Routerchat
+    Start-Routerchat -Version $newVersion -Platform $platformName
+    Complete-InstallTransaction
+    Write-InstallMetadata -Version $newVersion -Platform $platformName
+    $script:transactionStarted = $false
+
+    try {
+        Remove-PreviousApplication
+    }
+    catch {
+        Write-Step 'The old application cleanup will be retried during the next update.'
+    }
 
     Write-Step "Done. Start RouterChat later from the Start Menu or 'Start RouterChat.cmd' in $installRoot"
     $script:installFailed = $false
@@ -617,9 +976,31 @@ try {
 catch {
     $script:installFailed = $true
 
-    Write-Host "RouterChat installation failed: $($_.Exception.Message)"
+    if ($script:transactionStarted) {
+        try {
+            if (Test-Path -LiteralPath $previousApp) {
+                Stop-OwnedInstance | Out-Null
+                Restore-Application
+            }
+            elseif ($script:wasRunning -and -not (Get-RunningVersion)) {
+                Restart-PreviousInstance
+            }
+        }
+        catch {
+            Write-Step 'Automatic rollback could not finish. Rerun the installer to repair RouterChat.'
+        }
+    }
+
+    $prefix = if ($script:startFailed) {
+        'RouterChat was installed but could not be started'
+    }
+    else {
+        'RouterChat installation failed'
+    }
+
+    Write-Host "${prefix}: $($_.Exception.Message)"
     if ($script:logFile) {
-        Add-Content -LiteralPath $script:logFile -Value "RouterChat installation failed: $($_.Exception.Message)" -Encoding utf8
+        Add-Content -LiteralPath $script:logFile -Value "${prefix}: $($_.Exception.Message)" -Encoding utf8
         Write-Host "A sanitized log is at $script:logFile"
     }
 }
