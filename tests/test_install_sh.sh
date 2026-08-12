@@ -122,6 +122,8 @@ grep -q 'chmod 700.*runDir' "$installRoot/Start RouterChat.command" \
     || failTest "the macOS launcher did not protect its run directory"
 grep -q -- '--secret-file.*apiSecretFile' "$installRoot/Start RouterChat.command" \
     || failTest "the macOS launcher did not pass the credential by protected file"
+grep -q 'pip sync --require-hashes' "$repoDir/install.sh" \
+    || failTest "the macOS installer did not enforce dependency hashes"
 printf 'n\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
 [ -d "$installRoot" ] || failTest "declining uninstall removed RouterChat"
 [ -L "$HOME/Applications/RouterChat/Uninstall RouterChat.command" ] || failTest "the macOS uninstall alias was not created"

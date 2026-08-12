@@ -21,7 +21,8 @@ $requiredPatterns = @(
     'Initialize-SecureRunDirectory',
     'icacls\.exe.+/inheritance:r',
     'Get-OwnedProcess',
-    'Remove-Item -LiteralPath \$apiSecretFile'
+    'Remove-Item -LiteralPath \$apiSecretFile',
+    "'pip', 'sync', '--require-hashes'"
 )
 
 foreach ($pattern in $requiredPatterns) {

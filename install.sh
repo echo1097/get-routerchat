@@ -222,7 +222,7 @@ syncEnvironment() {
     fi
 
     say "Installing RouterChat's dependencies."
-    if ! "$uvBin" pip sync --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1; then
+    if ! "$uvBin" pip sync --require-hashes --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1; then
         restoreApplication
         fail "the RouterChat dependencies could not be installed"
     fi
@@ -408,7 +408,7 @@ restoreApplication() {
     say "Restored the previous RouterChat application files."
 
     if [ -x "$venvPython" ] && [ -f "$appDir/requirements.lock" ]; then
-        "$uvBin" pip sync --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1 || true
+        "$uvBin" pip sync --require-hashes --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1 || true
     fi
 
     restartPreviousInstance

@@ -239,7 +239,7 @@ function Sync-PrivateEnvironment {
 
     try {
         Invoke-PrivateTool `
-            -Arguments @('pip', 'sync', '--python', $venvPython, (Join-Path $appDir 'requirements.lock')) `
+            -Arguments @('pip', 'sync', '--require-hashes', '--python', $venvPython, (Join-Path $appDir 'requirements.lock')) `
             -FailureMessage 'The RouterChat dependencies could not be installed.'
     }
     catch {
@@ -459,7 +459,7 @@ function Restore-Application {
     if ((Test-Path -LiteralPath $venvPython) -and (Test-Path -LiteralPath $restoredLock)) {
         try {
             Invoke-PrivateTool `
-                -Arguments @('pip', 'sync', '--python', $venvPython, $restoredLock) `
+                -Arguments @('pip', 'sync', '--require-hashes', '--python', $venvPython, $restoredLock) `
                 -FailureMessage 'The previous dependencies could not be restored.'
         }
         catch {
