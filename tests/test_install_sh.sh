@@ -109,4 +109,54 @@ grep -q 'old-database' "$userDataDir/routerchat.sqlite3" || failTest "an interru
 [ ! -d "$previousApp" ] || failTest "the same-version rollback directory was not cleaned up"
 [ ! -e "$transactionFile" ] || failTest "the transaction marker survived rollback"
 
-printf 'install.sh rollback tests passed\n'
+resetFixture
+writeLaunchers
+createAliases
+printf 'n\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
+[ -d "$installRoot" ] || failTest "declining uninstall removed RouterChat"
+[ -L "$HOME/Applications/RouterChat/Uninstall RouterChat.command" ] || failTest "the macOS uninstall alias was not created"
+
+resetFixture
+writeLaunchers
+mkdir -p "$venvDir/bin"
+cat >"$venvPython" <<'EOF'
+#!/bin/sh
+cp "$3" "$4"
+EOF
+chmod 755 "$venvPython"
+printf '%s\n' 'saved-database' >"$userDataDir/routerchat.sqlite3"
+printf 'y\ny\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
+[ ! -e "$installRoot" ] || failTest "confirmed uninstall kept the RouterChat installation"
+[ ! -e "$HOME/Applications/RouterChat" ] || failTest "confirmed uninstall kept the macOS launcher aliases"
+backupDatabase="$(find "$HOME/Downloads" -name routerchat.sqlite3 -type f -print | head -n 1)"
+[ -n "$backupDatabase" ] || failTest "the uninstaller did not save the database"
+grep -q 'saved-database' "$backupDatabase" || failTest "the saved database does not match the user data"
+backupReadme="$(dirname "$backupDatabase")/README-userdata.txt"
+[ -f "$backupReadme" ] || failTest "the user data README was not created"
+grep -q 'private content' "$backupReadme" || failTest "the user data README is missing its privacy warning"
+
+resetFixture
+writeLaunchers
+printf '%s\n' 'do-not-save' >"$userDataDir/routerchat.sqlite3"
+backupCountBefore="$(find "$HOME/Downloads" -name routerchat.sqlite3 -type f -print | wc -l | tr -d ' ')"
+printf 'y\nn\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
+backupCountAfter="$(find "$HOME/Downloads" -name routerchat.sqlite3 -type f -print | wc -l | tr -d ' ')"
+[ "$backupCountBefore" = "$backupCountAfter" ] || failTest "declining the user data backup created one anyway"
+[ ! -e "$installRoot" ] || failTest "uninstall without a backup kept the RouterChat installation"
+
+resetFixture
+writeLaunchers
+mkdir -p "$venvDir/bin"
+cat >"$venvPython" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod 755 "$venvPython"
+printf '%s\n' 'must-survive' >"$userDataDir/routerchat.sqlite3"
+if printf 'y\ny\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null 2>&1; then
+    failTest "a failed user data backup reported a successful uninstall"
+fi
+[ -d "$installRoot" ] || failTest "a failed user data backup removed RouterChat"
+grep -q 'must-survive' "$userDataDir/routerchat.sqlite3" || failTest "a failed user data backup damaged the database"
+
+printf 'install.sh rollback and uninstaller tests passed\n'

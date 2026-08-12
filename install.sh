@@ -577,7 +577,175 @@ export ROUTERCHAT_INSTALL_ROOT
 sh "$workDir/update.sh"
 UPDATER
 
-    chmod 755 "$installRoot/Start RouterChat.command" "$installRoot/Update RouterChat.command" || return 1
+    cat >"$installRoot/Uninstall RouterChat.command" <<'UNINSTALLER' || return 1
+#!/bin/sh
+set -eu
+
+installRoot="$HOME/Library/Application Support/RouterChat"
+aliasDir="$HOME/Applications/RouterChat"
+userDataDir="$installRoot/user-data"
+logsDir="$installRoot/logs"
+venvDir="$installRoot/runtime/.venv"
+venvPython="$venvDir/bin/python"
+routerchatUrl="http://127.0.0.1:8000"
+
+askYesNo() {
+    prompt="$1"
+
+    while true; do
+        printf '%s (y/n) ' "$prompt"
+        IFS= read -r answer || answer=""
+
+        case "$answer" in
+            y | Y) return 0 ;;
+            n | N) return 1 ;;
+            *) printf 'Please enter y or n.\n' ;;
+        esac
+    done
+}
+
+routerchatIsHealthy() {
+    curl -fsS --max-time 2 "$routerchatUrl/api/health" 2>/dev/null | grep -q '"ok"'
+}
+
+ownedProcessId() {
+    pidFile="$logsDir/routerchat.pid"
+    [ -f "$pidFile" ] || return 1
+
+    ownedPid="$(head -n 1 "$pidFile")"
+    case "$ownedPid" in
+        "" | *[!0-9]*) return 1 ;;
+    esac
+
+    kill -0 "$ownedPid" 2>/dev/null || return 1
+    ps -o command= -p "$ownedPid" 2>/dev/null | grep -Fq "$venvDir" || return 1
+
+    printf '%s\n' "$ownedPid"
+}
+
+stopRouterchat() {
+    ownedPid="$(ownedProcessId)" || {
+        if routerchatIsHealthy; then
+            printf 'RouterChat is running but the uninstaller cannot identify it safely. Close RouterChat and try again.\n' >&2
+            return 1
+        fi
+        return 0
+    }
+
+    printf 'Stopping RouterChat.\n'
+    kill "$ownedPid" 2>/dev/null || true
+
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+        if ! kill -0 "$ownedPid" 2>/dev/null; then
+            rm -f "$logsDir/routerchat.pid"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+
+    printf 'RouterChat could not be stopped safely. Close it and run the uninstaller again.\n' >&2
+    return 1
+}
+
+saveUserData() {
+    databasePath="$userDataDir/routerchat.sqlite3"
+    if [ ! -f "$databasePath" ]; then
+        printf 'No RouterChat database was found, so there is no user data to save.\n'
+        return 0
+    fi
+
+    if [ ! -x "$venvPython" ]; then
+        printf 'RouterChat cannot create a safe database backup because its private Python runtime is missing. Nothing was removed.\n' >&2
+        return 1
+    fi
+
+    downloadsDir="$HOME/Downloads"
+    mkdir -p "$downloadsDir" || return 1
+
+    timestamp="$(date '+%Y%m%d-%H%M%S')"
+    backupDir="$downloadsDir/RouterChat-user-data-$timestamp"
+    suffix=1
+    while [ -e "$backupDir" ]; do
+        backupDir="$downloadsDir/RouterChat-user-data-$timestamp-$suffix"
+        suffix=$((suffix + 1))
+    done
+
+    mkdir -m 700 "$backupDir" || return 1
+    temporaryDatabase="$backupDir/routerchat.sqlite3.tmp"
+    backupDatabase="$backupDir/routerchat.sqlite3"
+    backupCode='import sqlite3, sys; source = sqlite3.connect(sys.argv[1]); destination = sqlite3.connect(sys.argv[2]); source.backup(destination); destination.close(); source.close()'
+
+    if ! "$venvPython" -c "$backupCode" "$databasePath" "$temporaryDatabase"; then
+        rm -rf "$backupDir"
+        printf 'The RouterChat database could not be backed up. Nothing was removed.\n' >&2
+        return 1
+    fi
+
+    mv "$temporaryDatabase" "$backupDatabase" || return 1
+    chmod 600 "$backupDatabase" 2>/dev/null || true
+
+    cat >"$backupDir/README-userdata.txt" <<'README'
+This SQLite database contains your RouterChat chats and writing data.
+
+To restore it, install RouterChat again, close RouterChat, then replace:
+~/Library/Application Support/RouterChat/user-data/routerchat.sqlite3
+
+with the routerchat.sqlite3 file in this folder before starting RouterChat.
+The database may contain private content, so do not share it publicly.
+README
+
+    chmod 600 "$backupDir/README-userdata.txt" 2>/dev/null || true
+    printf 'User data was saved to %s\n' "$backupDir"
+}
+
+if [ "$installRoot" = "/" ] || [ "$installRoot" = "$HOME" ] || [ -L "$installRoot" ]; then
+    printf 'The RouterChat installation path is unsafe. Nothing was removed.\n' >&2
+    exit 1
+fi
+
+if [ ! -d "$installRoot" ]; then
+    printf 'RouterChat is not installed.\n'
+    exit 0
+fi
+
+if ! askYesNo 'Are you sure you want to remove RouterChat'; then
+    printf 'Nothing was removed.\n'
+    exit 0
+fi
+
+saveData="no"
+if askYesNo 'Would you like to save user data'; then
+    saveData="yes"
+fi
+
+stopRouterchat || exit 1
+
+if [ "$saveData" = "yes" ]; then
+    saveUserData || exit 1
+fi
+
+rm -f "$aliasDir/Start RouterChat.command"
+rm -f "$aliasDir/Update RouterChat.command"
+rm -f "$aliasDir/Uninstall RouterChat.command"
+rmdir "$aliasDir" 2>/dev/null || true
+
+cd "$HOME"
+rm -rf "$installRoot"
+
+if [ -e "$installRoot" ]; then
+    printf 'RouterChat could not be fully removed.\n' >&2
+    exit 1
+fi
+
+printf 'RouterChat has been removed.\n'
+UNINSTALLER
+
+    chmod 755 \
+        "$installRoot/Start RouterChat.command" \
+        "$installRoot/Update RouterChat.command" \
+        "$installRoot/Uninstall RouterChat.command" || return 1
 }
 
 createAliases() {
@@ -586,6 +754,7 @@ createAliases() {
 
     ln -sfn "$installRoot/Start RouterChat.command" "$aliasDir/Start RouterChat.command" 2>/dev/null || true
     ln -sfn "$installRoot/Update RouterChat.command" "$aliasDir/Update RouterChat.command" 2>/dev/null || true
+    ln -sfn "$installRoot/Uninstall RouterChat.command" "$aliasDir/Uninstall RouterChat.command" 2>/dev/null || true
 }
 
 ownedProcessId() {

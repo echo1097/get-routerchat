@@ -697,6 +697,233 @@ Read-Host 'Press Enter to close this window'
 exit $exitCode
 '@
 
+    $uninstallScript = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$installRoot = $PSScriptRoot
+$expectedRoot = Join-Path $env:LOCALAPPDATA 'RouterChat'
+$userDataDir = Join-Path $installRoot 'user-data'
+$logsDir = Join-Path $installRoot 'logs'
+$venvDir = Join-Path $installRoot 'runtime\.venv'
+$venvPython = Join-Path $venvDir 'Scripts\python.exe'
+$routerchatUrl = 'http://127.0.0.1:8000'
+$startMenuDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\RouterChat'
+
+function Read-YesNo {
+    param([string] $Prompt)
+
+    while ($true) {
+        $answer = (Read-Host "$Prompt (y/n)").Trim()
+
+        if ($answer -ieq 'y') {
+            return $true
+        }
+        if ($answer -ieq 'n') {
+            return $false
+        }
+
+        Write-Host 'Please enter y or n.'
+    }
+}
+
+function Test-RouterchatHealthy {
+    try {
+        $response = Invoke-RestMethod -Uri "$routerchatUrl/api/health" -TimeoutSec 2 -UseBasicParsing
+        return [bool] $response.ok
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-OwnedProcess {
+    $pidFile = Join-Path $logsDir 'routerchat.pid'
+    if (-not (Test-Path -LiteralPath $pidFile)) {
+        return $null
+    }
+
+    $recordedLine = Get-Content -LiteralPath $pidFile -TotalCount 1
+    $recordedId = 0
+    if ([string]::IsNullOrWhiteSpace($recordedLine) -or -not [int]::TryParse($recordedLine.Trim(), [ref] $recordedId)) {
+        return $null
+    }
+
+    $process = Get-Process -Id $recordedId -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $null
+    }
+
+    try {
+        $details = Get-CimInstance Win32_Process -Filter "ProcessId = $recordedId" -ErrorAction Stop
+        if (-not $details.CommandLine -or -not $details.CommandLine.Contains($venvDir)) {
+            return $null
+        }
+    }
+    catch {
+        return $null
+    }
+
+    return $process
+}
+
+function Stop-Routerchat {
+    $process = Get-OwnedProcess
+    if (-not $process) {
+        if (Test-RouterchatHealthy) {
+            throw 'RouterChat is running but the uninstaller cannot identify it safely. Close RouterChat and try again.'
+        }
+        return
+    }
+
+    Write-Host 'Stopping RouterChat.'
+    Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
+
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
+        throw 'RouterChat could not be stopped safely. Close it and run the uninstaller again.'
+    }
+
+    Remove-Item -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Force -ErrorAction SilentlyContinue
+}
+
+function Save-UserData {
+    $databasePath = Join-Path $userDataDir 'routerchat.sqlite3'
+    if (-not (Test-Path -LiteralPath $databasePath)) {
+        Write-Host 'No RouterChat database was found, so there is no user data to save.'
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        throw 'RouterChat cannot create a safe database backup because its private Python runtime is missing. Nothing was removed.'
+    }
+
+    $downloadsDir = Join-Path $env:USERPROFILE 'Downloads'
+    New-Item -ItemType Directory -Path $downloadsDir -Force | Out-Null
+
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $backupDir = Join-Path $downloadsDir "RouterChat-user-data-$timestamp"
+    $suffix = 1
+    while (Test-Path -LiteralPath $backupDir) {
+        $backupDir = Join-Path $downloadsDir "RouterChat-user-data-$timestamp-$suffix"
+        $suffix++
+    }
+
+    New-Item -ItemType Directory -Path $backupDir | Out-Null
+    $temporaryDatabase = Join-Path $backupDir 'routerchat.sqlite3.tmp'
+    $backupDatabase = Join-Path $backupDir 'routerchat.sqlite3'
+    $backupCode = 'import sqlite3, sys; source = sqlite3.connect(sys.argv[1]); destination = sqlite3.connect(sys.argv[2]); source.backup(destination); destination.close(); source.close()'
+
+    & $venvPython -c $backupCode $databasePath $temporaryDatabase
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryDatabase)) {
+        Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw 'The RouterChat database could not be backed up. Nothing was removed.'
+    }
+
+    Move-Item -LiteralPath $temporaryDatabase -Destination $backupDatabase
+
+    $readmePath = Join-Path $backupDir 'README-userdata.txt'
+    $readme = @"
+This SQLite database contains your RouterChat chats and writing data.
+
+To restore it, install RouterChat again, close RouterChat, then replace:
+%LOCALAPPDATA%\RouterChat\user-data\routerchat.sqlite3
+
+with the routerchat.sqlite3 file in this folder before starting RouterChat.
+The database may contain private content, so do not share it publicly.
+"@
+    $withoutBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($readmePath, $readme, $withoutBom)
+
+    Write-Host "User data was saved to $backupDir"
+}
+
+function Start-DeferredCleanup {
+    $cleanupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("routerchat-uninstall-" + [System.Guid]::NewGuid().ToString('N') + '.ps1')
+    $cleanupScript = @(
+        'param('
+        '    [string] $InstallRoot,'
+        '    [int] $ParentProcessId,'
+        '    [string] $CleanupPath'
+        ')'
+        ''
+        '$ErrorActionPreference = ''SilentlyContinue'''
+        ''
+        'for ($attempt = 0; $attempt -lt 600; $attempt++) {'
+        '    if (-not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) {'
+        '        break'
+        '    }'
+        '    Start-Sleep -Milliseconds 500'
+        '}'
+        ''
+        'for ($attempt = 0; $attempt -lt 120; $attempt++) {'
+        '    Remove-Item -LiteralPath $InstallRoot -Recurse -Force'
+        '    if (-not (Test-Path -LiteralPath $InstallRoot)) {'
+        '        break'
+        '    }'
+        '    Start-Sleep -Milliseconds 500'
+        '}'
+        ''
+        'Remove-Item -LiteralPath $CleanupPath -Force'
+    ) -join [Environment]::NewLine
+
+    $withoutBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($cleanupPath, $cleanupScript, $withoutBom)
+
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$cleanupPath`"",
+        '-InstallRoot', "`"$installRoot`"",
+        '-ParentProcessId', $PID,
+        '-CleanupPath', "`"$cleanupPath`""
+    )
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory ([System.IO.Path]::GetTempPath()) -WindowStyle Hidden
+}
+
+try {
+    $rootPath = [System.IO.Path]::GetFullPath($installRoot).TrimEnd('\')
+    $safeRoot = [System.IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')
+    if ($rootPath -ne $safeRoot -or $rootPath -eq [System.IO.Path]::GetPathRoot($rootPath)) {
+        throw 'The RouterChat installation path is unsafe. Nothing was removed.'
+    }
+
+    if (-not (Test-Path -LiteralPath $installRoot)) {
+        Write-Host 'RouterChat is not installed.'
+        exit 0
+    }
+
+    if (-not (Read-YesNo -Prompt 'Are you sure you want to remove RouterChat')) {
+        Write-Host 'Nothing was removed.'
+        exit 0
+    }
+
+    $saveData = Read-YesNo -Prompt 'Would you like to save user data'
+
+    Stop-Routerchat
+    if ($saveData) {
+        Save-UserData
+    }
+
+    Remove-Item -LiteralPath $startMenuDir -Recurse -Force -ErrorAction SilentlyContinue
+    Start-DeferredCleanup
+
+    Write-Host 'RouterChat has been removed.'
+    exit 0
+}
+catch {
+    Write-Host "RouterChat could not be removed: $($_.Exception.Message)"
+    Read-Host 'Press Enter to close this window'
+    exit 1
+}
+'@
+
     $startCommand = @'
 @echo off
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-routerchat.ps1"
@@ -707,10 +934,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-routerchat.ps1"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-routerchat.ps1"
 '@
 
+    $uninstallCommand = @'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall-routerchat.ps1"
+'@
+
     Set-Content -LiteralPath (Join-Path $installRoot 'start-routerchat.ps1') -Value $startScript -Encoding utf8
     Set-Content -LiteralPath (Join-Path $installRoot 'update-routerchat.ps1') -Value $updateScript -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $installRoot 'uninstall-routerchat.ps1') -Value $uninstallScript -Encoding utf8
     Set-Content -LiteralPath (Join-Path $installRoot 'Start RouterChat.cmd') -Value $startCommand -Encoding ascii
     Set-Content -LiteralPath (Join-Path $installRoot 'Update RouterChat.cmd') -Value $updateCommand -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $installRoot 'Uninstall RouterChat.cmd') -Value $uninstallCommand -Encoding ascii
 }
 
 function New-StartMenuShortcuts {
@@ -731,6 +965,12 @@ function New-StartMenuShortcuts {
         $updateShortcut.WorkingDirectory = $installRoot
         $updateShortcut.Description = 'Update RouterChat'
         $updateShortcut.Save()
+
+        $uninstallShortcut = $shell.CreateShortcut((Join-Path $startMenuDir 'Uninstall RouterChat.lnk'))
+        $uninstallShortcut.TargetPath = Join-Path $installRoot 'Uninstall RouterChat.cmd'
+        $uninstallShortcut.WorkingDirectory = $installRoot
+        $uninstallShortcut.Description = 'Uninstall RouterChat'
+        $uninstallShortcut.Save()
     }
     catch {
         Write-Step 'Start Menu shortcuts could not be created. The launcher files still work.'
