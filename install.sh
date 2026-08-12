@@ -17,6 +17,8 @@ runtimeDir="$installRoot/runtime"
 userDataDir="$installRoot/user-data"
 backupsDir="$installRoot/backups"
 logsDir="$installRoot/logs"
+runDir="$installRoot/run"
+apiSecretFile="$runDir/api-secret"
 venvDir="$runtimeDir/.venv"
 venvPython="$venvDir/bin/python"
 logFile=""
@@ -460,6 +462,8 @@ appDir="$installRoot/app"
 venvPython="$installRoot/runtime/.venv/bin/python"
 userDataDir="$installRoot/user-data"
 logsDir="$installRoot/logs"
+runDir="$installRoot/run"
+apiSecretFile="$runDir/api-secret"
 routerchatPort="8000"
 routerchatUrl="http://127.0.0.1:$routerchatPort"
 serverPid=""
@@ -469,6 +473,7 @@ stopServer() {
         kill "$serverPid" 2>/dev/null || true
     fi
     rm -f "$logsDir/routerchat.pid"
+    rm -f "$apiSecretFile"
 }
 
 isRouterchatHealthy() {
@@ -483,6 +488,32 @@ isPortBusy() {
     fi
 }
 
+ownedProcessId() {
+    pidFile="$logsDir/routerchat.pid"
+    [ -f "$pidFile" ] || return 1
+
+    ownedPid="$(head -n 1 "$pidFile" | tr -dc '0-9')"
+    [ -n "$ownedPid" ] || return 1
+    kill -0 "$ownedPid" 2>/dev/null || return 1
+    ps -o command= -p "$ownedPid" 2>/dev/null | grep -Fq "$venvPython" || return 1
+    printf '%s\n' "$ownedPid"
+}
+
+openRouterchat() {
+    if [ -f "$appDir/backend/local_access.py" ]; then
+        [ -f "$apiSecretFile" ] || return 1
+        (
+            cd "$appDir"
+            "$venvPython" -m backend.local_access open-browser \
+                --secret-file "$apiSecretFile" \
+                --base-url "$routerchatUrl"
+        )
+        return
+    fi
+
+    open "$routerchatUrl"
+}
+
 for requiredPath in "$appDir/backend/main.py" "$appDir/dist/index.html" "$venvPython"; do
     if [ ! -e "$requiredPath" ]; then
         printf 'RouterChat is not installed correctly. Rerun the installer to repair it.\n' >&2
@@ -491,12 +522,20 @@ for requiredPath in "$appDir/backend/main.py" "$appDir/dist/index.html" "$venvPy
     fi
 done
 
-mkdir -p "$logsDir" "$userDataDir"
+mkdir -p "$logsDir" "$userDataDir" "$runDir"
+chmod 700 "$runDir" || {
+    printf 'RouterChat could not protect its process credential directory.\n' >&2
+    exit 1
+}
 logFile="$logsDir/launcher-$(date -u '+%Y-%m-%d').log"
 
 if isRouterchatHealthy; then
+    if ! ownedProcessId >/dev/null 2>&1; then
+        printf 'RouterChat is running but it was not started by this installation.\n' >&2
+        exit 1
+    fi
     printf 'RouterChat is already running. Opening it in your browser.\n'
-    open "$routerchatUrl" || printf 'RouterChat is ready at %s, but the browser could not be opened automatically.\n' "$routerchatUrl"
+    openRouterchat || printf 'RouterChat is ready at %s, but the browser could not be authorized automatically.\n' "$routerchatUrl"
     exit 0
 fi
 
@@ -510,9 +549,17 @@ trap stopServer EXIT INT TERM HUP
 
 ROUTERCHAT_USER_DATA_DIR="$userDataDir"
 export ROUTERCHAT_USER_DATA_DIR
+rm -f "$apiSecretFile"
 
 cd "$appDir"
-"$venvPython" -m uvicorn backend.main:app --host 127.0.0.1 --port "$routerchatPort" >>"$logFile" 2>&1 &
+if [ -f "$appDir/backend/local_access.py" ]; then
+    "$venvPython" -m backend.local_access serve \
+        --secret-file "$apiSecretFile" \
+        --base-url "$routerchatUrl" \
+        --trusted-origin "$routerchatUrl" >>"$logFile" 2>&1 &
+else
+    "$venvPython" -m uvicorn backend.main:app --host 127.0.0.1 --port "$routerchatPort" >>"$logFile" 2>&1 &
+fi
 serverPid=$!
 printf '%s\n' "$serverPid" >"$logsDir/routerchat.pid"
 
@@ -537,7 +584,7 @@ if ! isRouterchatHealthy; then
     exit 1
 fi
 
-open "$routerchatUrl" || printf 'RouterChat is ready at %s, but the browser could not be opened automatically.\n' "$routerchatUrl"
+openRouterchat || printf 'RouterChat is ready at %s, but the browser could not be authorized automatically.\n' "$routerchatUrl"
 
 printf 'RouterChat is running at %s\n' "$routerchatUrl"
 printf 'Closing this window stops RouterChat.\n'
@@ -778,6 +825,7 @@ stopOwnedInstance() {
     while [ "$attempt" -lt 15 ]; do
         if ! kill -0 "$ownedPid" 2>/dev/null && ! portIsBusy; then
             rm -f "$logsDir/routerchat.pid"
+            rm -f "$apiSecretFile"
             return 0
         fi
         attempt=$((attempt + 1))
@@ -807,11 +855,22 @@ launchBackend() {
     export ROUTERCHAT_USER_DATA_DIR
 
     startupLog="$logsDir/launcher-$(date -u '+%Y-%m-%d').log"
+    mkdir -p "$runDir" || return 1
+    chmod 700 "$runDir" || return 1
+    rm -f "$apiSecretFile"
 
     (
         cd "$appDir"
-        nohup "$venvPython" -m uvicorn backend.main:app --host 127.0.0.1 --port "$routerchatPort" \
-            >>"$startupLog" 2>&1 &
+        if [ -f "$appDir/backend/local_access.py" ]; then
+            nohup "$venvPython" -m backend.local_access serve \
+                --secret-file "$apiSecretFile" \
+                --base-url "http://127.0.0.1:$routerchatPort" \
+                --trusted-origin "http://127.0.0.1:$routerchatPort" \
+                >>"$startupLog" 2>&1 &
+        else
+            nohup "$venvPython" -m uvicorn backend.main:app --host 127.0.0.1 --port "$routerchatPort" \
+                >>"$startupLog" 2>&1 &
+        fi
         backendPid="$!"
         if ! printf '%s\n' "$backendPid" >"$logsDir/routerchat.pid"; then
             kill "$backendPid" 2>/dev/null || true
@@ -872,7 +931,16 @@ startRouterchat() {
     while [ "$attempt" -lt 60 ]; do
         startedVersion="$(runningVersion)"
         if [ "$startedVersion" = "$newVersion" ]; then
-            open "http://127.0.0.1:$routerchatPort" || say "RouterChat is ready, but the browser could not be opened automatically."
+            if [ -f "$appDir/backend/local_access.py" ]; then
+                (
+                    cd "$appDir"
+                    "$venvPython" -m backend.local_access open-browser \
+                        --secret-file "$apiSecretFile" \
+                        --base-url "http://127.0.0.1:$routerchatPort"
+                ) || say "RouterChat is ready, but the browser could not be authorized automatically."
+            else
+                open "http://127.0.0.1:$routerchatPort" || say "RouterChat is ready, but the browser could not be opened automatically."
+            fi
             say "RouterChat $newVersion is ready at http://127.0.0.1:$routerchatPort"
             return 0
         fi

@@ -18,6 +18,9 @@ $runtimeDir = Join-Path $installRoot 'runtime'
 $userDataDir = Join-Path $installRoot 'user-data'
 $backupsDir = Join-Path $installRoot 'backups'
 $logsDir = Join-Path $installRoot 'logs'
+$runDir = Join-Path $installRoot 'run'
+$apiSecretFile = Join-Path $runDir 'api-secret'
+$localAccessPath = Join-Path $appDir 'backend\local_access.py'
 $venvDir = Join-Path $runtimeDir '.venv'
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'
 $uvBin = Join-Path $runtimeDir 'tools\uv.exe'
@@ -527,6 +530,9 @@ $appDir = Join-Path $installRoot 'app'
 $venvPython = Join-Path $installRoot 'runtime\.venv\Scripts\python.exe'
 $userDataDir = Join-Path $installRoot 'user-data'
 $logsDir = Join-Path $installRoot 'logs'
+$runDir = Join-Path $installRoot 'run'
+$apiSecretFile = Join-Path $runDir 'api-secret'
+$localAccessPath = Join-Path $appDir 'backend\local_access.py'
 $routerchatPort = 8000
 $routerchatUrl = "http://127.0.0.1:$routerchatPort"
 
@@ -561,6 +567,67 @@ function Test-PortBusy {
     }
 }
 
+function Get-OwnedProcess {
+    $pidFile = Join-Path $logsDir 'routerchat.pid'
+    if (-not (Test-Path -LiteralPath $pidFile)) {
+        return $null
+    }
+
+    $recordedLine = Get-Content -LiteralPath $pidFile -TotalCount 1
+    $recordedId = 0
+    if ([string]::IsNullOrWhiteSpace($recordedLine) -or -not [int]::TryParse($recordedLine.Trim(), [ref] $recordedId)) {
+        return $null
+    }
+
+    $process = Get-Process -Id $recordedId -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $null
+    }
+
+    try {
+        $details = Get-CimInstance Win32_Process -Filter "ProcessId = $recordedId" -ErrorAction Stop
+        if (-not $details.CommandLine -or -not $details.CommandLine.Contains($venvPython)) {
+            return $null
+        }
+    }
+    catch {
+        return $null
+    }
+
+    return $process
+}
+
+function Initialize-SecureRunDirectory {
+    New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $currentGrant = "*$($currentSid):(OI)(CI)F"
+    & icacls.exe $runDir /inheritance:r /grant:r $currentGrant '*S-1-5-18:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RouterChat could not protect its process credential directory.'
+    }
+}
+
+function Open-Routerchat {
+    if (Test-Path -LiteralPath $localAccessPath) {
+        if (-not (Test-Path -LiteralPath $apiSecretFile)) {
+            throw 'RouterChat process credential is missing.'
+        }
+        Push-Location -LiteralPath $appDir
+        try {
+            & $venvPython -m backend.local_access open-browser --secret-file $apiSecretFile --base-url $routerchatUrl
+            if ($LASTEXITCODE -ne 0) {
+                throw 'The browser could not be authorized automatically.'
+            }
+        }
+        finally {
+            Pop-Location
+        }
+        return
+    }
+
+    Start-Process $routerchatUrl
+}
+
 foreach ($requiredPath in @((Join-Path $appDir 'backend\main.py'), (Join-Path $appDir 'dist\index.html'), $venvPython)) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         Write-Host 'RouterChat is not installed correctly. Rerun the installer to repair it.'
@@ -571,17 +638,22 @@ foreach ($requiredPath in @((Join-Path $appDir 'backend\main.py'), (Join-Path $a
 
 New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
+Initialize-SecureRunDirectory
 
 $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd-HHmmss')
 $logFile = Join-Path $logsDir "launcher-$stamp.log"
 
 if (Test-RouterchatHealthy) {
+    if (-not (Get-OwnedProcess)) {
+        Write-Host 'RouterChat is running but it was not started by this installation.'
+        exit 1
+    }
     Write-Host 'RouterChat is already running. Opening it in your browser.'
     try {
-        Start-Process $routerchatUrl
+        Open-Routerchat
     }
     catch {
-        Write-Host "RouterChat is ready at $routerchatUrl, but the browser could not be opened automatically."
+        Write-Host "RouterChat is ready at $routerchatUrl, but the browser could not be authorized automatically."
     }
     exit 0
 }
@@ -594,9 +666,23 @@ if (Test-PortBusy) {
 
 $env:ROUTERCHAT_USER_DATA_DIR = $userDataDir
 Set-Location -LiteralPath $appDir
+Remove-Item -LiteralPath $apiSecretFile -Force -ErrorAction SilentlyContinue
+$quotedSecretFile = '"' + $apiSecretFile + '"'
+
+$serverArguments = if (Test-Path -LiteralPath $localAccessPath) {
+    @(
+        '-m', 'backend.local_access', 'serve',
+        '--secret-file', $quotedSecretFile,
+        '--base-url', $routerchatUrl,
+        '--trusted-origin', $routerchatUrl
+    )
+}
+else {
+    @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort")
+}
 
 $server = Start-Process -FilePath $venvPython `
-    -ArgumentList @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort") `
+    -ArgumentList $serverArguments `
     -WorkingDirectory $appDir `
     -RedirectStandardOutput $logFile `
     -RedirectStandardError "$logFile.error" `
@@ -635,10 +721,10 @@ if (-not $ready) {
 }
 
 try {
-    Start-Process $routerchatUrl
+    Open-Routerchat
 }
 catch {
-    Write-Host "RouterChat is ready at $routerchatUrl, but the browser could not be opened automatically."
+    Write-Host "RouterChat is ready at $routerchatUrl, but the browser could not be authorized automatically."
 }
 
 Write-Host "RouterChat is running at $routerchatUrl"
@@ -652,6 +738,7 @@ finally {
         Stop-Process -Id $server.Id -Force
     }
     Remove-Item -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $apiSecretFile -Force -ErrorAction SilentlyContinue
 }
 '@
 
@@ -999,6 +1086,37 @@ function Test-PortInUse {
     }
 }
 
+function Initialize-SecureRunDirectory {
+    New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $currentGrant = "*$($currentSid):(OI)(CI)F"
+    & icacls.exe $runDir /inheritance:r /grant:r $currentGrant '*S-1-5-18:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RouterChat could not protect its process credential directory.'
+    }
+}
+
+function Open-Routerchat {
+    if (Test-Path -LiteralPath $localAccessPath) {
+        if (-not (Test-Path -LiteralPath $apiSecretFile)) {
+            throw 'RouterChat process credential is missing.'
+        }
+        Push-Location -LiteralPath $appDir
+        try {
+            & $venvPython -m backend.local_access open-browser --secret-file $apiSecretFile --base-url $routerchatUrl
+            if ($LASTEXITCODE -ne 0) {
+                throw 'The browser could not be authorized automatically.'
+            }
+        }
+        finally {
+            Pop-Location
+        }
+        return
+    }
+
+    Start-Process $routerchatUrl
+}
+
 function Get-OwnedProcess {
     $pidFile = Join-Path $logsDir 'routerchat.pid'
     if (-not (Test-Path -LiteralPath $pidFile)) {
@@ -1044,6 +1162,7 @@ function Stop-OwnedInstance {
     for ($attempt = 0; $attempt -lt 15; $attempt++) {
         if ($process.HasExited -and -not (Test-PortInUse)) {
             Remove-Item -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $apiSecretFile -Force -ErrorAction SilentlyContinue
             return $true
         }
         Start-Sleep -Seconds 1
@@ -1071,12 +1190,27 @@ function Stop-RunningInstance {
 
 function Start-Backend {
     $env:ROUTERCHAT_USER_DATA_DIR = $userDataDir
+    Initialize-SecureRunDirectory
+    Remove-Item -LiteralPath $apiSecretFile -Force -ErrorAction SilentlyContinue
 
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd-HHmmss')
     $script:startupLog = Join-Path $logsDir "launcher-$stamp.log"
+    $quotedSecretFile = '"' + $apiSecretFile + '"'
+
+    $serverArguments = if (Test-Path -LiteralPath $localAccessPath) {
+        @(
+            '-m', 'backend.local_access', 'serve',
+            '--secret-file', $quotedSecretFile,
+            '--base-url', $routerchatUrl,
+            '--trusted-origin', $routerchatUrl
+        )
+    }
+    else {
+        @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort")
+    }
 
     $server = Start-Process -FilePath $venvPython `
-        -ArgumentList @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort") `
+        -ArgumentList $serverArguments `
         -WorkingDirectory $appDir `
         -RedirectStandardOutput $script:startupLog `
         -RedirectStandardError "$($script:startupLog).error" `
@@ -1155,10 +1289,10 @@ function Start-Routerchat {
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
         if ((Get-RunningVersion) -eq $Version) {
             try {
-                Start-Process $routerchatUrl
+                Open-Routerchat
             }
             catch {
-                Write-Step 'RouterChat is ready, but the browser could not be opened automatically.'
+                Write-Step 'RouterChat is ready, but the browser could not be authorized automatically.'
             }
             Write-Step "RouterChat $Version is ready at $routerchatUrl"
             return

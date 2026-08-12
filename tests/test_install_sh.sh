@@ -112,6 +112,16 @@ grep -q 'old-database' "$userDataDir/routerchat.sqlite3" || failTest "an interru
 resetFixture
 writeLaunchers
 createAliases
+grep -q 'backend.local_access serve' "$installRoot/Start RouterChat.command" \
+    || failTest "the macOS launcher did not use authenticated local access"
+grep -q 'backend.local_access open-browser' "$installRoot/Start RouterChat.command" \
+    || failTest "the macOS launcher did not bootstrap the browser"
+grep -q 'ownedProcessId' "$installRoot/Start RouterChat.command" \
+    || failTest "the macOS launcher did not verify an existing process"
+grep -q 'chmod 700.*runDir' "$installRoot/Start RouterChat.command" \
+    || failTest "the macOS launcher did not protect its run directory"
+grep -q -- '--secret-file.*apiSecretFile' "$installRoot/Start RouterChat.command" \
+    || failTest "the macOS launcher did not pass the credential by protected file"
 printf 'n\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
 [ -d "$installRoot" ] || failTest "declining uninstall removed RouterChat"
 [ -L "$HOME/Applications/RouterChat/Uninstall RouterChat.command" ] || failTest "the macOS uninstall alias was not created"
