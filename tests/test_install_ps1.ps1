@@ -22,7 +22,9 @@ $requiredPatterns = @(
     'icacls\.exe.+/inheritance:r',
     'Get-OwnedProcess',
     'Remove-Item -LiteralPath \$apiSecretFile',
-    "'pip', 'sync', '--require-hashes'"
+    "'pip', 'sync', '--require-hashes'",
+    'Use of RouterChat is subject to the Terms of Service:',
+    'https://github\.com/echo1097/routerchat/blob/main/TOS\.md'
 )
 
 foreach ($pattern in $requiredPatterns) {

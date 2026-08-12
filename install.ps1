@@ -1310,6 +1310,10 @@ function Start-Routerchat {
     throw "The new version did not start in time. The previous version was restored. See $failedLog"
 }
 
+Write-Host 'Use of RouterChat is subject to the Terms of Service:'
+Write-Host 'https://github.com/echo1097/routerchat/blob/main/TOS.md'
+Write-Host ''
+
 try {
     $platformName = Test-SupportedPlatform
     Test-InstallRoot

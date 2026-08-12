@@ -967,6 +967,10 @@ startupFailed() {
 }
 
 main() {
+    printf '%s\n%s\n\n' \
+        'Use of RouterChat is subject to the Terms of Service:' \
+        'https://github.com/echo1097/routerchat/blob/main/TOS.md'
+
     requireCommand curl
     requireCommand shasum
     requireCommand tar

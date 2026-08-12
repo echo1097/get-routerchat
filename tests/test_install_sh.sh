@@ -124,6 +124,10 @@ grep -q -- '--secret-file.*apiSecretFile' "$installRoot/Start RouterChat.command
     || failTest "the macOS launcher did not pass the credential by protected file"
 grep -q 'pip sync --require-hashes' "$repoDir/install.sh" \
     || failTest "the macOS installer did not enforce dependency hashes"
+grep -q 'Use of RouterChat is subject to the Terms of Service:' "$repoDir/install.sh" \
+    || failTest "the macOS installer did not show the Terms of Service notice"
+grep -q 'https://github.com/echo1097/routerchat/blob/main/TOS.md' "$repoDir/install.sh" \
+    || failTest "the macOS installer did not link the Terms of Service"
 printf 'n\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
 [ -d "$installRoot" ] || failTest "declining uninstall removed RouterChat"
 [ -L "$HOME/Applications/RouterChat/Uninstall RouterChat.command" ] || failTest "the macOS uninstall alias was not created"
