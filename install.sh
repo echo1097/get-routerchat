@@ -851,32 +851,15 @@ stopRunningInstance() {
 }
 
 launchBackend() {
-    ROUTERCHAT_USER_DATA_DIR="$userDataDir"
-    export ROUTERCHAT_USER_DATA_DIR
-
+    launcherCommand="$installRoot/Start RouterChat.command"
     startupLog="$logsDir/launcher-$(date -u '+%Y-%m-%d').log"
-    mkdir -p "$runDir" || return 1
-    chmod 700 "$runDir" || return 1
-    rm -f "$apiSecretFile"
 
-    (
-        cd "$appDir"
-        if [ -f "$appDir/backend/local_access.py" ]; then
-            nohup "$venvPython" -m backend.local_access serve \
-                --secret-file "$apiSecretFile" \
-                --base-url "http://127.0.0.1:$routerchatPort" \
-                --trusted-origin "http://127.0.0.1:$routerchatPort" \
-                >>"$startupLog" 2>&1 &
-        else
-            nohup "$venvPython" -m uvicorn backend.main:app --host 127.0.0.1 --port "$routerchatPort" \
-                >>"$startupLog" 2>&1 &
-        fi
-        backendPid="$!"
-        if ! printf '%s\n' "$backendPid" >"$logsDir/routerchat.pid"; then
-            kill "$backendPid" 2>/dev/null || true
-            return 1
-        fi
-    )
+    [ -x "$launcherCommand" ] || return 1
+
+    mkdir -p "$logsDir" "$runDir" || return 1
+    chmod 700 "$runDir" || return 1
+
+    open -a Terminal "$launcherCommand" || return 1
 }
 
 restartPreviousInstance() {
@@ -909,7 +892,7 @@ restartPreviousInstance() {
 }
 
 startRouterchat() {
-    say "Starting RouterChat $newVersion."
+    say "Starting RouterChat $newVersion in its own window."
 
     if portIsBusy; then
         if [ -d "$previousApp" ]; then
@@ -931,17 +914,8 @@ startRouterchat() {
     while [ "$attempt" -lt 60 ]; do
         startedVersion="$(runningVersion)"
         if [ "$startedVersion" = "$newVersion" ]; then
-            if [ -f "$appDir/backend/local_access.py" ]; then
-                (
-                    cd "$appDir"
-                    "$venvPython" -m backend.local_access open-browser \
-                        --secret-file "$apiSecretFile" \
-                        --base-url "http://127.0.0.1:$routerchatPort"
-                ) || say "RouterChat is ready, but the browser could not be authorized automatically."
-            else
-                open "http://127.0.0.1:$routerchatPort" || say "RouterChat is ready, but the browser could not be opened automatically."
-            fi
             say "RouterChat $newVersion is ready at http://127.0.0.1:$routerchatPort"
+            say "It runs in the RouterChat window that just opened. Closing that window stops RouterChat."
             return 0
         fi
         attempt=$((attempt + 1))

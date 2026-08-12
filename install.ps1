@@ -20,7 +20,6 @@ $backupsDir = Join-Path $installRoot 'backups'
 $logsDir = Join-Path $installRoot 'logs'
 $runDir = Join-Path $installRoot 'run'
 $apiSecretFile = Join-Path $runDir 'api-secret'
-$localAccessPath = Join-Path $appDir 'backend\local_access.py'
 $venvDir = Join-Path $runtimeDir '.venv'
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'
 $uvBin = Join-Path $runtimeDir 'tools\uv.exe'
@@ -30,7 +29,6 @@ $script:workDir = $null
 $script:installFailed = $false
 $script:startFailed = $false
 $script:wasRunning = $false
-$script:startupLog = $null
 $script:backupDir = $null
 $script:hadEnv = $false
 $script:hadDatabase = $false
@@ -1096,27 +1094,6 @@ function Initialize-SecureRunDirectory {
     }
 }
 
-function Open-Routerchat {
-    if (Test-Path -LiteralPath $localAccessPath) {
-        if (-not (Test-Path -LiteralPath $apiSecretFile)) {
-            throw 'RouterChat process credential is missing.'
-        }
-        Push-Location -LiteralPath $appDir
-        try {
-            & $venvPython -m backend.local_access open-browser --secret-file $apiSecretFile --base-url $routerchatUrl
-            if ($LASTEXITCODE -ne 0) {
-                throw 'The browser could not be authorized automatically.'
-            }
-        }
-        finally {
-            Pop-Location
-        }
-        return
-    }
-
-    Start-Process $routerchatUrl
-}
-
 function Get-OwnedProcess {
     $pidFile = Join-Path $logsDir 'routerchat.pid'
     if (-not (Test-Path -LiteralPath $pidFile)) {
@@ -1188,42 +1165,28 @@ function Stop-RunningInstance {
     }
 }
 
+function Get-LatestStartupLog {
+    $latestLog = Get-ChildItem -LiteralPath $logsDir -Filter 'launcher-*.log' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if ($latestLog) {
+        return $latestLog.FullName
+    }
+
+    return $logsDir
+}
+
 function Start-Backend {
-    $env:ROUTERCHAT_USER_DATA_DIR = $userDataDir
+    $launcherCommand = Join-Path $installRoot 'Start RouterChat.cmd'
+    if (-not (Test-Path -LiteralPath $launcherCommand)) {
+        throw 'The RouterChat launcher is missing.'
+    }
+
+    New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
     Initialize-SecureRunDirectory
-    Remove-Item -LiteralPath $apiSecretFile -Force -ErrorAction SilentlyContinue
 
-    $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd-HHmmss')
-    $script:startupLog = Join-Path $logsDir "launcher-$stamp.log"
-    $quotedSecretFile = '"' + $apiSecretFile + '"'
-
-    $serverArguments = if (Test-Path -LiteralPath $localAccessPath) {
-        @(
-            '-m', 'backend.local_access', 'serve',
-            '--secret-file', $quotedSecretFile,
-            '--base-url', $routerchatUrl,
-            '--trusted-origin', $routerchatUrl
-        )
-    }
-    else {
-        @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', "$routerchatPort")
-    }
-
-    $server = Start-Process -FilePath $venvPython `
-        -ArgumentList $serverArguments `
-        -WorkingDirectory $appDir `
-        -RedirectStandardOutput $script:startupLog `
-        -RedirectStandardError "$($script:startupLog).error" `
-        -WindowStyle Hidden `
-        -PassThru
-
-    try {
-        Set-Content -LiteralPath (Join-Path $logsDir 'routerchat.pid') -Value $server.Id -Encoding utf8
-    }
-    catch {
-        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-        throw
-    }
+    Start-Process -FilePath $launcherCommand -WorkingDirectory $installRoot | Out-Null
 }
 
 function Restart-PreviousInstance {
@@ -1264,7 +1227,7 @@ function Restart-PreviousInstance {
 function Start-Routerchat {
     param([string] $Version, [string] $Platform)
 
-    Write-Step "Starting RouterChat $Version."
+    Write-Step "Starting RouterChat $Version in its own window."
 
     if (Test-PortInUse) {
         if (Test-Path -LiteralPath $previousApp) {
@@ -1288,13 +1251,8 @@ function Start-Routerchat {
 
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
         if ((Get-RunningVersion) -eq $Version) {
-            try {
-                Open-Routerchat
-            }
-            catch {
-                Write-Step 'RouterChat is ready, but the browser could not be authorized automatically.'
-            }
             Write-Step "RouterChat $Version is ready at $routerchatUrl"
+            Write-Step 'It runs in the RouterChat window that just opened. Closing that window stops RouterChat.'
             return
         }
         Start-Sleep -Seconds 1
@@ -1304,7 +1262,7 @@ function Start-Routerchat {
 
     Write-Step "RouterChat $Version did not start, so the previous version is being restored."
 
-    $failedLog = $script:startupLog
+    $failedLog = Get-LatestStartupLog
     Restore-Application
 
     throw "The new version did not start in time. The previous version was restored. See $failedLog"
