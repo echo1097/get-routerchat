@@ -124,6 +124,12 @@ grep -q -- '--secret-file.*apiSecretFile' "$installRoot/Start RouterChat.command
     || failTest "the macOS launcher did not pass the credential by protected file"
 grep -q 'pip sync --require-hashes' "$repoDir/install.sh" \
     || failTest "the macOS installer did not enforce dependency hashes"
+grep -q -- "--proto '=https' --proto-redir '=https'" "$repoDir/install.sh" \
+    || failTest "the macOS installer did not pin the redirect protocol"
+[ "$(grep -c -- "--proto '=https' --proto-redir '=https'" "$repoDir/install.sh")" = "3" ] \
+    || failTest "an https download in the macOS installer is missing its protocol pins"
+grep -q -- "--proto '=https' --proto-redir '=https'" "$repoDir/updater/update.sh" \
+    || failTest "the macOS updater did not pin the redirect protocol"
 grep -q 'Use of RouterChat is subject to the Terms of Service:' "$repoDir/install.sh" \
     || failTest "the macOS installer did not show the Terms of Service notice"
 grep -q 'https://github.com/echo1097/routerchat/blob/main/TOS.md' "$repoDir/install.sh" \

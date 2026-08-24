@@ -6,6 +6,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+[Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $updaterVersion = '1.0.0'
 $appRepo = 'echo1097/routerchat'
 $releaseApiUrl = "https://api.github.com/repos/$appRepo/releases/latest"
@@ -35,14 +38,142 @@ function Get-VersionValue {
     return [version] $normalizedValue
 }
 
+function Confirm-HttpsUri {
+    param([string] $Url)
+
+    $uri = [Uri] $Url
+
+    if ($uri.Scheme -ne 'https') {
+        throw "Refusing a download over an insecure connection: $Url"
+    }
+
+    return $uri
+}
+
+function Get-RedirectLocation {
+    param($Response)
+
+    if ($null -eq $Response) {
+        return $null
+    }
+
+    $location = $null
+
+    try {
+        $location = $Response.Headers.Location | Select-Object -First 1
+    }
+    catch {
+        $location = $null
+    }
+
+    if (-not $location) {
+        try {
+            $location = $Response.Headers['Location']
+        }
+        catch {
+            $location = $null
+        }
+    }
+
+    if (-not $location) {
+        return $null
+    }
+
+    return [string] $location
+}
+
+function Get-WebExceptionResponse {
+    param($Exception)
+
+    $current = $Exception
+
+    while ($null -ne $current) {
+        if ($current -is [System.Net.WebException] -and $null -ne $current.Response) {
+            return $current.Response
+        }
+
+        $current = $current.InnerException
+    }
+
+    return $null
+}
+
+function New-HttpRequest {
+    param([string] $Url)
+
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = 'RouterChat-Installer'
+    $request.Timeout = 120000
+    $request.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+
+    return $request
+}
+
+function Save-ResponseBody {
+    param($Response, [string] $Destination)
+
+    $responseStream = $Response.GetResponseStream()
+    $fileStream = [System.IO.File]::Create($Destination)
+
+    try {
+        $responseStream.CopyTo($fileStream)
+    }
+    finally {
+        $fileStream.Dispose()
+        $responseStream.Dispose()
+    }
+}
+
 function Get-RemoteFile {
     param([string] $Url, [string] $Destination)
 
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 5
-    }
-    catch {
-        throw "Could not download $Url"
+    $currentUrl = (Confirm-HttpsUri $Url).AbsoluteUri
+    $hopsLeft = 5
+
+    while ($true) {
+        $request = New-HttpRequest -Url $currentUrl
+        $response = $null
+
+        try {
+            $response = $request.GetResponse()
+        }
+        catch {
+            $response = Get-WebExceptionResponse $_.Exception
+        }
+
+        if ($null -eq $response) {
+            throw "Could not download $Url"
+        }
+
+        try {
+            $statusCode = [int] $response.StatusCode
+
+            if ($statusCode -ge 300 -and $statusCode -lt 400) {
+                $location = Get-RedirectLocation $response
+
+                if (-not $location -or $hopsLeft -le 0) {
+                    throw "Could not download $Url"
+                }
+
+                $nextUri = [Uri]::new([Uri] $currentUrl, $location)
+                $currentUrl = (Confirm-HttpsUri $nextUri.AbsoluteUri).AbsoluteUri
+                $hopsLeft -= 1
+
+                continue
+            }
+
+            if ($statusCode -ne 200) {
+                throw "Could not download $Url"
+            }
+
+            Save-ResponseBody -Response $response -Destination $Destination
+
+            return
+        }
+        finally {
+            $response.Dispose()
+        }
     }
 }
 

@@ -1,6 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+[Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $appRepo = 'echo1097/routerchat'
 $appZipUrl = "https://github.com/$appRepo/releases/latest/download/routerchat-app.zip"
 $appChecksumUrl = "https://github.com/$appRepo/releases/latest/download/routerchat-app.zip.sha256"
@@ -93,14 +96,142 @@ function New-InstallDirectories {
     }
 }
 
+function Confirm-HttpsUri {
+    param([string] $Url)
+
+    $uri = [Uri] $Url
+
+    if ($uri.Scheme -ne 'https') {
+        throw "Refusing a download over an insecure connection: $Url"
+    }
+
+    return $uri
+}
+
+function Get-RedirectLocation {
+    param($Response)
+
+    if ($null -eq $Response) {
+        return $null
+    }
+
+    $location = $null
+
+    try {
+        $location = $Response.Headers.Location | Select-Object -First 1
+    }
+    catch {
+        $location = $null
+    }
+
+    if (-not $location) {
+        try {
+            $location = $Response.Headers['Location']
+        }
+        catch {
+            $location = $null
+        }
+    }
+
+    if (-not $location) {
+        return $null
+    }
+
+    return [string] $location
+}
+
+function Get-WebExceptionResponse {
+    param($Exception)
+
+    $current = $Exception
+
+    while ($null -ne $current) {
+        if ($current -is [System.Net.WebException] -and $null -ne $current.Response) {
+            return $current.Response
+        }
+
+        $current = $current.InnerException
+    }
+
+    return $null
+}
+
+function New-HttpRequest {
+    param([string] $Url)
+
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = 'RouterChat-Installer'
+    $request.Timeout = 120000
+    $request.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+
+    return $request
+}
+
+function Save-ResponseBody {
+    param($Response, [string] $Destination)
+
+    $responseStream = $Response.GetResponseStream()
+    $fileStream = [System.IO.File]::Create($Destination)
+
+    try {
+        $responseStream.CopyTo($fileStream)
+    }
+    finally {
+        $fileStream.Dispose()
+        $responseStream.Dispose()
+    }
+}
+
 function Get-RemoteFile {
     param([string] $Url, [string] $Destination)
 
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 5
-    }
-    catch {
-        throw "Could not download $Url"
+    $currentUrl = (Confirm-HttpsUri $Url).AbsoluteUri
+    $hopsLeft = 5
+
+    while ($true) {
+        $request = New-HttpRequest -Url $currentUrl
+        $response = $null
+
+        try {
+            $response = $request.GetResponse()
+        }
+        catch {
+            $response = Get-WebExceptionResponse $_.Exception
+        }
+
+        if ($null -eq $response) {
+            throw "Could not download $Url"
+        }
+
+        try {
+            $statusCode = [int] $response.StatusCode
+
+            if ($statusCode -ge 300 -and $statusCode -lt 400) {
+                $location = Get-RedirectLocation $response
+
+                if (-not $location -or $hopsLeft -le 0) {
+                    throw "Could not download $Url"
+                }
+
+                $nextUri = [Uri]::new([Uri] $currentUrl, $location)
+                $currentUrl = (Confirm-HttpsUri $nextUri.AbsoluteUri).AbsoluteUri
+                $hopsLeft -= 1
+
+                continue
+            }
+
+            if ($statusCode -ne 200) {
+                throw "Could not download $Url"
+            }
+
+            Save-ResponseBody -Response $response -Destination $Destination
+
+            return
+        }
+        finally {
+            $response.Dispose()
+        }
     }
 }
 
@@ -744,7 +875,149 @@ finally {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+[Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 Write-Host 'Checking for a newer version of RouterChat.'
+
+function Confirm-HttpsUri {
+    param([string] $Url)
+
+    $uri = [Uri] $Url
+
+    if ($uri.Scheme -ne 'https') {
+        throw "Refusing a download over an insecure connection: $Url"
+    }
+
+    return $uri
+}
+
+function Get-RedirectLocation {
+    param($Response)
+
+    if ($null -eq $Response) {
+        return $null
+    }
+
+    $location = $null
+
+    try {
+        $location = $Response.Headers.Location | Select-Object -First 1
+    }
+    catch {
+        $location = $null
+    }
+
+    if (-not $location) {
+        try {
+            $location = $Response.Headers['Location']
+        }
+        catch {
+            $location = $null
+        }
+    }
+
+    if (-not $location) {
+        return $null
+    }
+
+    return [string] $location
+}
+
+function Get-WebExceptionResponse {
+    param($Exception)
+
+    $current = $Exception
+
+    while ($null -ne $current) {
+        if ($current -is [System.Net.WebException] -and $null -ne $current.Response) {
+            return $current.Response
+        }
+
+        $current = $current.InnerException
+    }
+
+    return $null
+}
+
+function New-HttpRequest {
+    param([string] $Url)
+
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = 'RouterChat-Installer'
+    $request.Timeout = 120000
+    $request.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+
+    return $request
+}
+
+function Save-ResponseBody {
+    param($Response, [string] $Destination)
+
+    $responseStream = $Response.GetResponseStream()
+    $fileStream = [System.IO.File]::Create($Destination)
+
+    try {
+        $responseStream.CopyTo($fileStream)
+    }
+    finally {
+        $fileStream.Dispose()
+        $responseStream.Dispose()
+    }
+}
+
+function Get-RemoteFile {
+    param([string] $Url, [string] $Destination)
+
+    $currentUrl = (Confirm-HttpsUri $Url).AbsoluteUri
+    $hopsLeft = 5
+
+    while ($true) {
+        $request = New-HttpRequest -Url $currentUrl
+        $response = $null
+
+        try {
+            $response = $request.GetResponse()
+        }
+        catch {
+            $response = Get-WebExceptionResponse $_.Exception
+        }
+
+        if ($null -eq $response) {
+            throw "Could not download $Url"
+        }
+
+        try {
+            $statusCode = [int] $response.StatusCode
+
+            if ($statusCode -ge 300 -and $statusCode -lt 400) {
+                $location = Get-RedirectLocation $response
+
+                if (-not $location -or $hopsLeft -le 0) {
+                    throw "Could not download $Url"
+                }
+
+                $nextUri = [Uri]::new([Uri] $currentUrl, $location)
+                $currentUrl = (Confirm-HttpsUri $nextUri.AbsoluteUri).AbsoluteUri
+                $hopsLeft -= 1
+
+                continue
+            }
+
+            if ($statusCode -ne 200) {
+                throw "Could not download $Url"
+            }
+
+            Save-ResponseBody -Response $response -Destination $Destination
+
+            return
+        }
+        finally {
+            $response.Dispose()
+        }
+    }
+}
 
 $updateUrl = 'https://echo1097.github.io/get-routerchat/updater/update.ps1'
 $checksumsUrl = 'https://echo1097.github.io/get-routerchat/updater/checksums.txt'
@@ -756,8 +1029,8 @@ try {
     $updatePath = Join-Path $workDir 'update.ps1'
     $checksumsPath = Join-Path $workDir 'checksums.txt'
 
-    Invoke-WebRequest -Uri $updateUrl -OutFile $updatePath -UseBasicParsing -MaximumRedirection 5
-    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing -MaximumRedirection 5
+    Get-RemoteFile -Url $updateUrl -Destination $updatePath
+    Get-RemoteFile -Url $checksumsUrl -Destination $checksumsPath
 
     $checksumLine = Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match '\supdate\.ps1$' } | Select-Object -First 1
     $expectedSum = ($checksumLine -split '\s+')[0]

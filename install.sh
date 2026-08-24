@@ -124,7 +124,7 @@ createDirectories() {
 }
 
 download() {
-    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$2" "$1" \
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$2" "$1" \
         || fail "could not download $1"
 }
 
