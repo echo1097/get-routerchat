@@ -44,6 +44,10 @@ progressPath=""
 progressTotal=0
 progressLabel=""
 progressBase=0
+nextMeasure=0
+measuredKind=""
+measuredBytes=0
+measuredCount=0
 stepPlain=""
 stepNumber=0
 packageTotal=0
@@ -57,6 +61,7 @@ if [ -t 1 ]; then
     green="$(printf '\033[32m')"
     yellow="$(printf '\033[33m')"
     cyan="$(printf '\033[36m')"
+    blue="$(printf '\033[38;5;33m')"
     reset="$(printf '\033[0m')"
     clearLine="$(printf '\033[K')"
     lineUp="$(printf '\033[1A')"
@@ -64,7 +69,7 @@ if [ -t 1 ]; then
     showCursor="$(printf '\033[?25h')"
 else
     fancy="no"
-    bold="" dim="" red="" green="" yellow="" cyan="" reset="" clearLine="" lineUp="" hideCursor="" showCursor=""
+    bold="" dim="" red="" green="" yellow="" cyan="" blue="" reset="" clearLine="" lineUp="" hideCursor="" showCursor=""
 fi
 
 logLine() {
@@ -129,10 +134,12 @@ progressBar() {
 
 movingBar() {
     blockSize=6
-    travel=$((barWidth - blockSize))
-    position=$((spinTick % (travel * 2)))
-    [ "$position" -gt "$travel" ] && position=$((travel * 2 - position))
-    printf '%s%s%s%s%s%s%s' "$dim" "$(repeatText '░' "$position")" "$green" "$(repeatText '█' "$blockSize")" "$dim" "$(repeatText '░' $((travel - position)))" "$reset"
+    blockEnd=$((spinTick * 3 / 2 % (barWidth + blockSize)))
+    blockStart=$((blockEnd - blockSize))
+    [ "$blockStart" -lt 0 ] && blockStart=0
+    [ "$blockEnd" -gt "$barWidth" ] && blockEnd="$barWidth"
+
+    printf '%s%s%s%s%s%s%s' "$dim" "$(repeatText '░' "$blockStart")" "$blue" "$(repeatText '█' $((blockEnd - blockStart)))" "$dim" "$(repeatText '░' $((barWidth - blockEnd)))" "$reset"
 }
 
 megabytes() {
@@ -169,11 +176,32 @@ lockedPackages() {
     grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==' "$1" | grep -v "sys_platform == 'win32'" | wc -l | tr -d ' '
 }
 
-progressText() {
+measureProgress() {
+    measuredKind="$progressKind"
+    measuredBytes=0
+    measuredCount=0
+
     case "$progressKind" in
         bytes)
             [ "$progressTotal" -gt 0 ] || progressTotal="$(headerLength "$progressPath.headers")"
-            current="$(fileBytes "$progressPath")"
+            measuredBytes="$(fileBytes "$progressPath")"
+            ;;
+        growth)
+            measuredBytes="$(folderBytes "$progressPath")"
+            ;;
+        packages)
+            measuredCount="$(installedPackages)"
+            if [ "$measuredCount" -eq 0 ]; then
+                measuredBytes=$(($(folderBytes "$progressPath") - progressBase))
+            fi
+            ;;
+    esac
+}
+
+progressText() {
+    case "$progressKind" in
+        bytes)
+            current="$measuredBytes"
             if [ "$progressTotal" -gt 0 ]; then
                 [ "$current" -gt "$progressTotal" ] && current="$progressTotal"
                 printf '%s %s / %s  %3d%%' "$(progressBar "$current" "$progressTotal")" "$(megabytes "$current")" "$(megabytes "$progressTotal")" $((100 * current / progressTotal))
@@ -182,13 +210,13 @@ progressText() {
             fi
             ;;
         growth)
-            printf '%s %s  %s' "$(movingBar)" "$progressLabel" "$(megabytes "$(folderBytes "$progressPath")")"
+            printf '%s %s  %s' "$(movingBar)" "$progressLabel" "$(megabytes "$measuredBytes")"
             ;;
         packages)
-            current="$(installedPackages)"
+            current="$measuredCount"
             [ "$current" -gt "$progressTotal" ] && current="$progressTotal"
             if [ "$current" -eq 0 ]; then
-                downloaded=$(($(folderBytes "$progressPath") - progressBase))
+                downloaded="$measuredBytes"
                 [ "$downloaded" -lt 0 ] && downloaded=0
                 printf '%s downloading packages  %s' "$(movingBar)" "$(megabytes "$downloaded")"
                 return 0
@@ -215,6 +243,9 @@ stepStart() {
     barDrawn="no"
     progressKind=""
     progressTotal=0
+    nextMeasure=0
+    measuredBytes=0
+    measuredCount=0
     note "$stepPlain"
 
     [ "$fancy" = "yes" ] && printf '%s' "$stepPrefix"
@@ -223,12 +254,17 @@ stepStart() {
 
 stepTick() {
     [ "$stepOpen" = "yes" ] && [ "$fancy" = "yes" ] || return 0
-    spinTick=$((spinTick + 1))
-    frame="$dim$(spinnerFrame "$spinTick")$reset"
+    spinTick=$((spinTick + ${1:-1}))
+    frame="$dim$(spinnerFrame $((spinTick / 2)))$reset"
 
     if [ -z "$progressKind" ]; then
         printf '\r%s %s' "$stepPrefix" "$frame"
         return 0
+    fi
+
+    if [ "$spinTick" -ge "$nextMeasure" ] || [ "$measuredKind" != "$progressKind" ]; then
+        measureProgress
+        nextMeasure=$((spinTick + 6))
     fi
 
     if [ "$barDrawn" = "yes" ]; then
@@ -270,7 +306,7 @@ watchCommand() {
 
     while kill -0 "$watchedPid" 2>/dev/null; do
         stepTick
-        sleep 0.1
+        sleep 0.05
     done
 
     if wait "$watchedPid"; then
@@ -283,7 +319,7 @@ watchCommand() {
 pause() {
     pauseTicks=$(($1 * 5))
     while [ "$pauseTicks" -gt 0 ]; do
-        stepTick
+        stepTick 4
         sleep 0.2
         pauseTicks=$((pauseTicks - 1))
     done
@@ -1232,7 +1268,7 @@ startRouterchat() {
             return 0
         fi
         attempt=$((attempt + 1))
-        stepTick
+        stepTick 4
         sleep 0.2
     done
 

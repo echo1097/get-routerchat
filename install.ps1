@@ -50,6 +50,7 @@ $script:stepNumber = 0
 $script:stepLabel = ''
 $script:barDrawn = $false
 $script:spinTick = 0
+$script:animationStart = Get-Date
 $script:lastTick = [DateTime]::MinValue
 $script:progressKind = $null
 $script:progressPath = $null
@@ -150,15 +151,14 @@ function Write-Bar {
 
 function Write-MovingBar {
     $blockSize = 6
-    $travel = $script:barWidth - $blockSize
-    $position = $script:spinTick % ($travel * 2)
-    if ($position -gt $travel) {
-        $position = $travel * 2 - $position
-    }
+    $elapsed = ((Get-Date) - $script:animationStart).TotalMilliseconds
+    $blockEnd = [int] ([Math]::Floor($elapsed * 30 / 1000) % ($script:barWidth + $blockSize))
+    $blockStart = [Math]::Max(0, $blockEnd - $blockSize)
+    $blockEnd = [Math]::Min($script:barWidth, $blockEnd)
 
-    Write-Host -NoNewline ($lightBlock * $position) -ForegroundColor DarkGray
-    Write-Host -NoNewline ($fullBlock * $blockSize) -ForegroundColor Green
-    Write-Host -NoNewline ($lightBlock * ($travel - $position)) -ForegroundColor DarkGray
+    Write-Host -NoNewline ($lightBlock * $blockStart) -ForegroundColor DarkGray
+    Write-Host -NoNewline ($fullBlock * ($blockEnd - $blockStart)) -ForegroundColor Blue
+    Write-Host -NoNewline ($lightBlock * ($script:barWidth - $blockEnd)) -ForegroundColor DarkGray
 }
 
 function Get-FolderSize {
@@ -257,12 +257,12 @@ function Update-Step {
         return
     }
 
-    if (((Get-Date) - $script:lastTick).TotalMilliseconds -lt 90) {
+    if (((Get-Date) - $script:lastTick).TotalMilliseconds -lt 45) {
         return
     }
 
     $script:lastTick = Get-Date
-    $script:spinTick += 1
+    $script:spinTick = [int] [Math]::Floor(((Get-Date) - $script:animationStart).TotalMilliseconds / 100)
     $frame = $spinnerFrames[$script:spinTick % $spinnerFrames.Count]
 
     if (-not $script:progressKind) {
@@ -352,7 +352,7 @@ function Invoke-WatchedProcess {
 
         while (-not $process.HasExited) {
             Update-Step
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds 50
         }
 
         $process.WaitForExit()
