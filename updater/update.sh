@@ -11,13 +11,67 @@ installerUrl="https://echo1097.github.io/get-routerchat/install.sh"
 installRoot="${ROUTERCHAT_INSTALL_ROOT:-}"
 workDir=""
 lockDir=""
+checkOpen="no"
+checkPrefix=""
+spinTick=0
+
+if [ -t 1 ]; then
+    fancy="yes"
+    bold="$(printf '\033[1m')"
+    dim="$(printf '\033[2m')"
+    red="$(printf '\033[31m')"
+    yellow="$(printf '\033[33m')"
+    reset="$(printf '\033[0m')"
+    clearLine="$(printf '\033[K')"
+    hideCursor="$(printf '\033[?25l')"
+    showCursor="$(printf '\033[?25h')"
+else
+    fancy="no"
+    bold="" dim="" red="" yellow="" reset="" clearLine="" hideCursor="" showCursor=""
+fi
+
+spinnerFrame() {
+    case $(($1 % 10)) in
+        0) printf '⠋' ;;
+        1) printf '⠙' ;;
+        2) printf '⠹' ;;
+        3) printf '⠸' ;;
+        4) printf '⠼' ;;
+        5) printf '⠴' ;;
+        6) printf '⠦' ;;
+        7) printf '⠧' ;;
+        8) printf '⠇' ;;
+        *) printf '⠏' ;;
+    esac
+}
+
+checkStart() {
+    checkPrefix="Checking for updates $dim................................$reset"
+    checkOpen="yes"
+    [ "$fancy" = "yes" ] && printf '%s%s' "$hideCursor" "$checkPrefix"
+    return 0
+}
+
+checkTick() {
+    [ "$checkOpen" = "yes" ] && [ "$fancy" = "yes" ] || return 0
+    spinTick=$((spinTick + 1))
+    printf '\r%s %s%s%s' "$checkPrefix" "$dim" "$(spinnerFrame "$spinTick")" "$reset"
+}
+
+checkFinish() {
+    [ "$checkOpen" = "yes" ] || return 0
+    printf '\r%s %s%s%s%s\n' "$checkPrefix" "$2" "$1" "$reset" "$clearLine"
+    checkOpen="no"
+}
 
 fail() {
-    printf 'RouterChat update failed: %s\n' "$1" >&2
+    checkFinish "failed" "$red"
+    printf '\n%s%s✗ RouterChat update failed:%s %s\n' "$red" "$bold" "$reset" "$1" >&2
     exit 1
 }
 
 cleanup() {
+    printf '%s' "$showCursor"
     if [ -n "$workDir" ] && [ -d "$workDir" ]; then
         rm -rf "$workDir"
     fi
@@ -51,8 +105,15 @@ acquireUpdateLock() {
 }
 
 download() {
-    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$2" "$1" \
-        || fail "could not download $1"
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$2" "$1" 2>/dev/null &
+    downloadPid=$!
+
+    while kill -0 "$downloadPid" 2>/dev/null; do
+        checkTick
+        sleep 0.1
+    done
+
+    wait "$downloadPid" || fail "could not download $1"
 }
 
 jsonString() {
@@ -188,20 +249,24 @@ main() {
     workDir="$(mktemp -d "${TMPDIR:-/tmp}/routerchat-update.XXXXXX")"
     chmod 700 "$workDir"
 
+    printf '%sRouterChat updater%s\n' "$bold" "$reset"
+    checkStart
+
     readInstalledMetadata
     readLatestRelease
 
     if [ "$(normalizeVersion "$installedVersion")" = "$latestVersion" ]; then
-        printf 'RouterChat %s is already the latest version.\n' "$installedVersion"
+        checkFinish "up to date" "$dim"
+        printf '\nRouterChat %s is already the latest version.\n' "$installedVersion"
         exit 0
     fi
 
     if versionAtLeast "$installedVersion" "$latestVersion"; then
-        printf 'RouterChat %s is newer than the latest stable release, so no update was installed.\n' "$installedVersion"
+        checkFinish "up to date" "$dim"
+        printf '\nRouterChat %s is newer than the latest stable release, so no update was installed.\n' "$installedVersion"
         exit 0
     fi
 
-    printf 'Updating RouterChat from %s to %s.\n' "$installedVersion" "$latestVersion"
     validateLatestPackage
 
     ROUTERCHAT_EXPECTED_VERSION="$latestVersion"
@@ -209,9 +274,11 @@ main() {
     export ROUTERCHAT_EXPECTED_VERSION ROUTERCHAT_EXPECTED_APP_SHA256
 
     download "$installerUrl" "$workDir/install.sh"
+    checkFinish "$latestVersion available" "$yellow"
+
+    printf '\n%sUpdating RouterChat %s → %s%s\n' "$bold" "$installedVersion" "$latestVersion" "$reset"
 
     if sh "$workDir/install.sh"; then
-        printf 'RouterChat was updated to %s.\n' "$latestVersion"
         exit 0
     fi
 

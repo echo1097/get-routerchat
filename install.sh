@@ -29,33 +29,298 @@ backupDir=""
 hadEnv="no"
 hadDatabase="no"
 previousVersion=""
+newVersion=""
+updateMode="no"
+[ -n "${ROUTERCHAT_EXPECTED_VERSION:-}" ] && updateMode="yes"
+
+stepWidth=46
+barWidth=24
+stepPrefix=""
+stepOpen="no"
+barDrawn="no"
+spinTick=0
+progressKind=""
+progressPath=""
+progressTotal=0
+progressLabel=""
+progressBase=0
+stepPlain=""
+stepNumber=0
+packageTotal=0
+runtimeWasReady="no"
+
+if [ -t 1 ]; then
+    fancy="yes"
+    bold="$(printf '\033[1m')"
+    dim="$(printf '\033[2m')"
+    red="$(printf '\033[31m')"
+    green="$(printf '\033[32m')"
+    yellow="$(printf '\033[33m')"
+    cyan="$(printf '\033[36m')"
+    reset="$(printf '\033[0m')"
+    clearLine="$(printf '\033[K')"
+    lineUp="$(printf '\033[1A')"
+    hideCursor="$(printf '\033[?25l')"
+    showCursor="$(printf '\033[?25h')"
+else
+    fancy="no"
+    bold="" dim="" red="" green="" yellow="" cyan="" reset="" clearLine="" lineUp="" hideCursor="" showCursor=""
+fi
+
+logLine() {
+    [ -n "$logFile" ] || return 0
+    printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >>"$logFile" 2>/dev/null || true
+}
+
+note() {
+    logLine "$1"
+}
+
+shortPath() {
+    case "$1" in
+        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+dots() {
+    count=$((stepWidth - ${#1}))
+    [ "$count" -lt 3 ] && count=3
+
+    dotLine=""
+    while [ "$count" -gt 0 ]; do
+        dotLine="$dotLine."
+        count=$((count - 1))
+    done
+
+    printf '%s' "$dotLine"
+}
+
+spinnerFrame() {
+    case $(($1 % 10)) in
+        0) printf '⠋' ;;
+        1) printf '⠙' ;;
+        2) printf '⠹' ;;
+        3) printf '⠸' ;;
+        4) printf '⠼' ;;
+        5) printf '⠴' ;;
+        6) printf '⠦' ;;
+        7) printf '⠧' ;;
+        8) printf '⠇' ;;
+        *) printf '⠏' ;;
+    esac
+}
+
+repeatText() {
+    repeatCount="$2"
+    repeated=""
+    while [ "$repeatCount" -gt 0 ]; do
+        repeated="$repeated$1"
+        repeatCount=$((repeatCount - 1))
+    done
+    printf '%s' "$repeated"
+}
+
+progressBar() {
+    filled=$((barWidth * $1 / $2))
+    [ "$filled" -gt "$barWidth" ] && filled="$barWidth"
+    printf '%s%s%s%s%s' "$green" "$(repeatText '█' "$filled")" "$dim" "$(repeatText '░' $((barWidth - filled)))" "$reset"
+}
+
+movingBar() {
+    blockSize=6
+    travel=$((barWidth - blockSize))
+    position=$((spinTick % (travel * 2)))
+    [ "$position" -gt "$travel" ] && position=$((travel * 2 - position))
+    printf '%s%s%s%s%s%s%s' "$dim" "$(repeatText '░' "$position")" "$green" "$(repeatText '█' "$blockSize")" "$dim" "$(repeatText '░' $((travel - position)))" "$reset"
+}
+
+megabytes() {
+    tenths=$(($1 * 10 / 1048576))
+    printf '%d.%d MB' $((tenths / 10)) $((tenths % 10))
+}
+
+fileBytes() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        printf '0'
+    fi
+}
+
+headerLength() {
+    [ -f "$1" ] || { printf '0'; return 0; }
+    tr -d '\r' <"$1" | awk 'tolower($1) == "content-length:" { size = $2 } END { print size + 0 }'
+}
+
+folderBytes() {
+    if [ -d "$1" ]; then
+        du -sk "$1" 2>/dev/null | awk '{ print $1 * 1024 }'
+    else
+        printf '0'
+    fi
+}
+
+installedPackages() {
+    find "$venvDir"/lib/python*/site-packages -maxdepth 1 -name '*.dist-info' 2>/dev/null | wc -l | tr -d ' '
+}
+
+lockedPackages() {
+    grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==' "$1" | grep -v "sys_platform == 'win32'" | wc -l | tr -d ' '
+}
+
+progressText() {
+    case "$progressKind" in
+        bytes)
+            [ "$progressTotal" -gt 0 ] || progressTotal="$(headerLength "$progressPath.headers")"
+            current="$(fileBytes "$progressPath")"
+            if [ "$progressTotal" -gt 0 ]; then
+                [ "$current" -gt "$progressTotal" ] && current="$progressTotal"
+                printf '%s %s / %s  %3d%%' "$(progressBar "$current" "$progressTotal")" "$(megabytes "$current")" "$(megabytes "$progressTotal")" $((100 * current / progressTotal))
+            else
+                printf '%s %s' "$(movingBar)" "$(megabytes "$current")"
+            fi
+            ;;
+        growth)
+            printf '%s %s  %s' "$(movingBar)" "$progressLabel" "$(megabytes "$(folderBytes "$progressPath")")"
+            ;;
+        packages)
+            current="$(installedPackages)"
+            [ "$current" -gt "$progressTotal" ] && current="$progressTotal"
+            if [ "$current" -eq 0 ]; then
+                downloaded=$(($(folderBytes "$progressPath") - progressBase))
+                [ "$downloaded" -lt 0 ] && downloaded=0
+                printf '%s downloading packages  %s' "$(movingBar)" "$(megabytes "$downloaded")"
+                return 0
+            fi
+            printf '%s %d / %d packages  %3d%%' "$(progressBar "$current" "$progressTotal")" "$current" "$progressTotal" $((100 * current / progressTotal))
+            ;;
+    esac
+}
+
+printTerms() {
+    printf '%sUse of RouterChat is subject to the Terms of Service:%s\n' "$dim" "$reset"
+    printf '%shttps://github.com/echo1097/routerchat/blob/main/TOS.md%s\n\n' "$dim" "$reset"
+}
+
+stepLabel() {
+    stepPrefix="$dim[$1/6]$reset $2 $dim$(dots "$2")$reset"
+    stepPlain="[$1/6] $2"
+}
+
+stepStart() {
+    stepLabel "$1" "$2"
+    stepNumber="$1"
+    stepOpen="yes"
+    barDrawn="no"
+    progressKind=""
+    progressTotal=0
+    note "$stepPlain"
+
+    [ "$fancy" = "yes" ] && printf '%s' "$stepPrefix"
+    return 0
+}
+
+stepTick() {
+    [ "$stepOpen" = "yes" ] && [ "$fancy" = "yes" ] || return 0
+    spinTick=$((spinTick + 1))
+    frame="$dim$(spinnerFrame "$spinTick")$reset"
+
+    if [ -z "$progressKind" ]; then
+        printf '\r%s %s' "$stepPrefix" "$frame"
+        return 0
+    fi
+
+    if [ "$barDrawn" = "yes" ]; then
+        printf '%s' "$lineUp"
+    fi
+
+    printf '\r%s %s%s\n\r      %s%s' "$stepPrefix" "$frame" "$clearLine" "$(progressText)" "$clearLine"
+    barDrawn="yes"
+}
+
+stepFinish() {
+    [ "$stepOpen" = "yes" ] || return 0
+
+    status="$1"
+    tone="$2"
+    barText="${3:-}"
+
+    [ "$barDrawn" = "yes" ] && printf '%s' "$lineUp"
+    printf '\r%s %s%s%s%s\n' "$stepPrefix" "$tone" "$status" "$reset" "$clearLine"
+
+    if [ -n "$barText" ]; then
+        printf '      %s %s%s%s%s\n' "$(progressBar 1 1)" "$dim" "$barText" "$reset" "$clearLine"
+    elif [ "$barDrawn" = "yes" ]; then
+        printf '%s' "$clearLine"
+    fi
+
+    stepOpen="no"
+    barDrawn="no"
+    note "$stepPlain $status"
+}
+
+stepFailed() {
+    stepFinish "failed" "$red"
+}
+
+watchCommand() {
+    "$@" &
+    watchedPid=$!
+
+    while kill -0 "$watchedPid" 2>/dev/null; do
+        stepTick
+        sleep 0.1
+    done
+
+    if wait "$watchedPid"; then
+        return 0
+    else
+        return $?
+    fi
+}
+
+pause() {
+    pauseTicks=$(($1 * 5))
+    while [ "$pauseTicks" -gt 0 ]; do
+        stepTick
+        sleep 0.2
+        pauseTicks=$((pauseTicks - 1))
+    done
+}
+
+warn() {
+    stepFailed
+    printf '%s! %s%s\n' "$yellow" "$1" "$reset"
+    logLine "$1"
+}
+
+notice() {
+    printf '%s! %s%s\n' "$yellow" "$1" "$reset"
+    logLine "$1"
+}
+
+showFailure() {
+    stepFailed
+    printf '\n%s%s✗ %s:%s %s\n' "$red" "$bold" "$1" "$reset" "$2" >&2
+    logLine "$1: $2"
+    if [ -n "$logFile" ]; then
+        printf '%s  Log: %s%s\n' "$dim" "$(shortPath "$logFile")" "$reset" >&2
+    fi
+}
 
 fail() {
-    printf 'RouterChat installation failed: %s\n' "$1" >&2
-    if [ -n "$logFile" ]; then
-        printf 'RouterChat installation failed: %s\n' "$1" >>"$logFile" 2>/dev/null || true
-        printf 'A sanitized log is at %s\n' "$logFile" >&2
-    fi
+    showFailure "RouterChat installation failed" "$1"
     exit 1
 }
 
 failStart() {
-    printf 'RouterChat was installed but could not be started: %s\n' "$1" >&2
-    if [ -n "$logFile" ]; then
-        printf 'RouterChat was installed but could not be started: %s\n' "$1" >>"$logFile" 2>/dev/null || true
-        printf 'A sanitized log is at %s\n' "$logFile" >&2
-    fi
+    showFailure "RouterChat was installed but could not be started" "$1"
     exit 1
 }
 
-say() {
-    printf '%s\n' "$1"
-    if [ -n "$logFile" ]; then
-        printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >>"$logFile" 2>/dev/null || true
-    fi
-}
-
 cleanup() {
+    printf '%s' "$showCursor"
     if [ -n "$workDir" ] && [ -d "$workDir" ]; then
         rm -rf "$workDir"
     fi
@@ -123,9 +388,18 @@ createDirectories() {
     : >>"$logFile"
 }
 
+fetchFile() {
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 2 -D "$2.headers" -o "$2" "$1" 2>>"${logFile:-/dev/null}"
+}
+
 download() {
-    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$2" "$1" \
-        || fail "could not download $1"
+    if [ "${3:-}" = "track" ]; then
+        progressKind="bytes"
+        progressPath="$2"
+        progressTotal=0
+    fi
+
+    watchCommand fetchFile "$1" "$2" || fail "could not download $1"
 }
 
 verifyChecksum() {
@@ -153,9 +427,7 @@ extractZip() {
 }
 
 downloadApplication() {
-    say "Downloading RouterChat."
-
-    download "$appZipUrl" "$workDir/routerchat-app.zip"
+    download "$appZipUrl" "$workDir/routerchat-app.zip" track
     download "$appChecksumUrl" "$workDir/routerchat-app.zip.sha256"
     verifyChecksum "$workDir/routerchat-app.zip" "$workDir/routerchat-app.zip.sha256"
 
@@ -188,12 +460,17 @@ installRuntime() {
     export UV_PYTHON_INSTALL_DIR UV_CACHE_DIR UV_NO_MODIFY_PATH
 
     uvBin="$runtimeDir/tools/uv"
+    runtimeWasReady="no"
+    if [ -x "$uvBin" ] && [ -n "$(ls -A "$runtimeDir/python" 2>/dev/null)" ]; then
+        runtimeWasReady="yes"
+    fi
+
     if [ ! -x "$uvBin" ]; then
-        say "Setting up RouterChat's private Python runtime."
+        note "Setting up RouterChat's private Python runtime."
 
         uvArchive="uv-$uvTarget.tar.gz"
         uvBaseUrl="https://github.com/astral-sh/uv/releases/download/$uvVersion"
-        download "$uvBaseUrl/$uvArchive" "$workDir/$uvArchive"
+        download "$uvBaseUrl/$uvArchive" "$workDir/$uvArchive" track
         download "$uvBaseUrl/$uvArchive.sha256" "$workDir/$uvArchive.sha256"
         verifyChecksum "$workDir/$uvArchive" "$workDir/$uvArchive.sha256"
 
@@ -207,13 +484,23 @@ installRuntime() {
         chmod 755 "$uvBin"
     fi
 
-    "$uvBin" python install "$pythonVersion" >>"$logFile" 2>&1 \
+    if [ "$runtimeWasReady" = "no" ]; then
+        progressKind="growth"
+        progressPath="$runtimeDir/python"
+        progressLabel="Python $pythonVersion"
+    fi
+
+    watchCommand runLogged "$uvBin" python install "$pythonVersion" \
         || fail "the private Python runtime could not be installed"
+}
+
+runLogged() {
+    "$@" >>"$logFile" 2>&1
 }
 
 syncEnvironment() {
     if [ ! -x "$venvPython" ]; then
-        say "Creating RouterChat's private environment."
+        note "Creating RouterChat's private environment."
         rm -rf "$venvDir"
         if ! "$uvBin" venv --python "$pythonVersion" --managed-python "$venvDir" >>"$logFile" 2>&1; then
             restoreApplication
@@ -221,8 +508,16 @@ syncEnvironment() {
         fi
     fi
 
-    say "Installing RouterChat's dependencies."
-    if ! "$uvBin" pip sync --require-hashes --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1; then
+    packageTotal="$(lockedPackages "$appDir/requirements.lock")"
+    if [ "$packageTotal" -gt 0 ]; then
+        progressKind="packages"
+        progressTotal="$packageTotal"
+        progressPath="$runtimeDir/cache"
+        progressBase="$(folderBytes "$progressPath")"
+    fi
+
+    note "Installing RouterChat's dependencies."
+    if ! watchCommand runLogged "$uvBin" pip sync --require-hashes --python "$venvPython" "$appDir/requirements.lock"; then
         restoreApplication
         fail "the RouterChat dependencies could not be installed"
     fi
@@ -248,7 +543,7 @@ backupUserData() {
         cp "$userDataDir/routerchat.sqlite3" "$backupDir/routerchat.sqlite3" || return 1
     fi
 
-    say "Saved a backup of your existing RouterChat data."
+    note "Saved a backup of your existing RouterChat data."
     trimBackups
 }
 
@@ -272,7 +567,7 @@ restoreUserData() {
         rm -f "$userDataDir/routerchat.sqlite3"
     fi
 
-    say "Restored the previous RouterChat user data."
+    warn "Restored the previous RouterChat user data."
 }
 
 loadLatestBackupSnapshot() {
@@ -320,7 +615,7 @@ recoverInterruptedInstallation() {
         mv "$previousApp" "$appDir"
         restoreUserData
         rm -f "$transactionFile"
-        say "Recovered the previous RouterChat version after an interrupted update."
+        notice "Recovered the previous RouterChat version after an interrupted update."
         return 0
     fi
 
@@ -330,7 +625,7 @@ recoverInterruptedInstallation() {
         mv "$previousApp" "$appDir"
         restoreUserData
         rm -f "$transactionFile"
-        say "Rolled back an interrupted RouterChat update."
+        notice "Rolled back an interrupted RouterChat update."
         return 0
     fi
 
@@ -342,7 +637,7 @@ recoverInterruptedInstallation() {
 
     if [ -n "$appVersion" ] && [ "$appVersion" = "$metadataVersion" ]; then
         rm -rf "$previousApp"
-        say "Finished cleanup from the previous RouterChat update."
+        note "Finished cleanup from the previous RouterChat update."
         return 0
     fi
 
@@ -350,7 +645,7 @@ recoverInterruptedInstallation() {
     rm -rf "$appDir"
     mv "$previousApp" "$appDir"
     restoreUserData
-    say "Rolled back an interrupted RouterChat update."
+    notice "Rolled back an interrupted RouterChat update."
 }
 
 trimBackups() {
@@ -375,7 +670,7 @@ trimBackups() {
 }
 
 installApplication() {
-    say "Installing RouterChat $newVersion."
+    note "Installing RouterChat $newVersion."
 
     if [ ! -d "$appDir" ] && [ -d "$previousApp" ]; then
         mv "$previousApp" "$appDir"
@@ -405,7 +700,7 @@ restoreApplication() {
     mv "$previousApp" "$appDir"
     restoreUserData
     rm -f "$transactionFile"
-    say "Restored the previous RouterChat application files."
+    warn "Restored the previous RouterChat application files."
 
     if [ -x "$venvPython" ] && [ -f "$appDir/requirements.lock" ]; then
         "$uvBin" pip sync --require-hashes --python "$venvPython" "$appDir/requirements.lock" >>"$logFile" 2>&1 || true
@@ -596,8 +891,6 @@ LAUNCHER
 #!/bin/sh
 set -eu
 
-printf 'Checking for a newer version of RouterChat.\n'
-
 installRoot="$(cd "$(dirname "$0")" && pwd)"
 workDir="$(mktemp -d "${TMPDIR:-/tmp}/routerchat-updater-bootstrap.XXXXXX")"
 updateUrl="https://echo1097.github.io/get-routerchat/updater/update.sh"
@@ -778,6 +1071,11 @@ rm -f "$aliasDir/Update RouterChat.command"
 rm -f "$aliasDir/Uninstall RouterChat.command"
 rmdir "$aliasDir" 2>/dev/null || true
 
+desktopLink="$HOME/Desktop/RouterChat"
+if [ -L "$desktopLink" ] && [ "$(readlink "$desktopLink")" = "$aliasDir" ]; then
+    rm -f "$desktopLink"
+fi
+
 cd "$HOME"
 rm -rf "$installRoot"
 
@@ -802,6 +1100,17 @@ createAliases() {
     ln -sfn "$installRoot/Start RouterChat.command" "$aliasDir/Start RouterChat.command" 2>/dev/null || true
     ln -sfn "$installRoot/Update RouterChat.command" "$aliasDir/Update RouterChat.command" 2>/dev/null || true
     ln -sfn "$installRoot/Uninstall RouterChat.command" "$aliasDir/Uninstall RouterChat.command" 2>/dev/null || true
+}
+
+createDesktopShortcut() {
+    desktopLink="$HOME/Desktop/RouterChat"
+
+    [ -z "$previousVersion" ] || return 0
+    [ -d "$HOME/Desktop" ] || return 0
+    [ -d "$aliasDir" ] || return 0
+    [ -L "$desktopLink" ] || [ ! -e "$desktopLink" ] || return 0
+
+    ln -sfn "$aliasDir" "$desktopLink" 2>/dev/null || true
 }
 
 ownedProcessId() {
@@ -829,13 +1138,13 @@ stopOwnedInstance() {
             return 0
         fi
         attempt=$((attempt + 1))
-        sleep 1
+        pause 1
     done
 
     return 1
 }
 
-stopRunningInstance() {
+detectRunningInstance() {
     wasRunning="no"
 
     if ! routerchatIsHealthy; then
@@ -845,7 +1154,12 @@ stopRunningInstance() {
     fi
 
     wasRunning="yes"
-    say "Stopping the running RouterChat so it can be updated safely."
+}
+
+stopRunningInstance() {
+    detectRunningInstance
+    [ "$wasRunning" = "yes" ] || return 0
+    note "Stopping the running RouterChat so it can be updated safely."
 
     stopOwnedInstance || fail "RouterChat is running but was not started by this installation. Close it, then run the installer again."
 }
@@ -867,7 +1181,7 @@ restartPreviousInstance() {
     [ -x "$venvPython" ] && [ -f "$appDir/backend/main.py" ] || return 0
 
     if portIsBusy; then
-        say "The previous RouterChat version was restored but port $routerchatPort is busy, so it could not be restarted."
+        warn "The previous RouterChat version was restored but port $routerchatPort is busy, so it could not be restarted."
         return 0
     fi
 
@@ -880,7 +1194,7 @@ restartPreviousInstance() {
     while [ "$attempt" -lt 60 ]; do
         restoredVersion="$(runningVersion)"
         if [ -n "$restoredVersion" ] && { [ -z "$previousVersion" ] || [ "$restoredVersion" = "$previousVersion" ]; }; then
-            say "Restarted the RouterChat version that was running before."
+            warn "Restarted the RouterChat version that was running before."
             return 0
         fi
         attempt=$((attempt + 1))
@@ -888,11 +1202,11 @@ restartPreviousInstance() {
     done
 
     stopOwnedInstance || true
-    say "The previous RouterChat version was restored but could not be restarted. Use 'Start RouterChat.command' to try again."
+    warn "The previous RouterChat version was restored but could not be restarted. Use 'Start RouterChat.command' to try again."
 }
 
 startRouterchat() {
-    say "Starting RouterChat $newVersion in its own window."
+    note "Starting RouterChat $newVersion in its own window."
 
     if portIsBusy; then
         if [ -d "$previousApp" ]; then
@@ -905,21 +1219,21 @@ startRouterchat() {
     fi
 
     if ! launchBackend; then
-        say "RouterChat $newVersion could not create its backend process, so the previous version is being restored."
+        warn "RouterChat $newVersion could not create its backend process, so the previous version is being restored."
         restoreApplication
         fail "the RouterChat backend process could not be started"
     fi
 
     attempt=0
-    while [ "$attempt" -lt 60 ]; do
+    while [ "$attempt" -lt 300 ]; do
         startedVersion="$(runningVersion)"
         if [ "$startedVersion" = "$newVersion" ]; then
-            say "RouterChat $newVersion is ready at http://127.0.0.1:$routerchatPort"
-            say "It runs in the RouterChat window that just opened. Closing that window stops RouterChat."
+            note "RouterChat $newVersion is ready at http://127.0.0.1:$routerchatPort"
             return 0
         fi
         attempt=$((attempt + 1))
-        sleep 1
+        stepTick
+        sleep 0.2
     done
 
     startupFailed
@@ -932,7 +1246,7 @@ startupFailed() {
         fail "the process on port $routerchatPort could not be identified safely; close it, then rerun the installer"
     fi
 
-    say "RouterChat $newVersion did not start, so the previous version is being restored."
+    warn "RouterChat $newVersion did not start, so the previous version is being restored."
 
     failedLog="$startupLog"
     restoreApplication
@@ -940,10 +1254,39 @@ startupFailed() {
     fail "the new version did not start in time. The previous version was restored. See $failedLog"
 }
 
+printHeader() {
+    if [ "$updateMode" = "yes" ]; then
+        printTerms
+        return 0
+    fi
+
+    printf '%sRouterChat installer%s\n' "$bold" "$reset"
+    printTerms
+    printf '%sInstalling RouterChat%s\n\n' "$bold" "$reset"
+}
+
+printEnding() {
+    if [ "$updateMode" = "yes" ] || { [ -n "$previousVersion" ] && [ "$previousVersion" != "$newVersion" ]; }; then
+        headline="RouterChat updated to $newVersion and running"
+    else
+        headline="RouterChat $newVersion is installed and running"
+    fi
+
+    startCommand="$installRoot/Start RouterChat.command"
+    [ -L "$HOME/Applications/RouterChat/Start RouterChat.command" ] && startCommand="$HOME/Applications/RouterChat/Start RouterChat.command"
+    [ -L "$HOME/Desktop/RouterChat" ] && [ -e "$HOME/Desktop/RouterChat/Start RouterChat.command" ] && startCommand="$HOME/Desktop/RouterChat/Start RouterChat.command"
+
+    printf '\n%s%s✓ %s%s\n' "$green" "$bold" "$headline" "$reset"
+    printf '%s  Open:   %s%shttp://127.0.0.1:%s%s\n' "$dim" "$reset" "$cyan" "$routerchatPort" "$reset"
+    printf '%s  Stop:   %sClose the RouterChat window that just opened\n' "$dim" "$reset"
+    printf '%s  Later:  %s%s\n' "$dim" "$reset" "$(shortPath "$startCommand")"
+    printf '%s  Logs:   %s%s\n' "$dim" "$(shortPath "$logsDir")" "$reset"
+    note "$headline"
+}
+
 main() {
-    printf '%s\n%s\n\n' \
-        'Use of RouterChat is subject to the Terms of Service:' \
-        'https://github.com/echo1097/routerchat/blob/main/TOS.md'
+    trap cleanup EXIT INT TERM HUP
+    printHeader
 
     requireCommand curl
     requireCommand shasum
@@ -956,25 +1299,57 @@ main() {
 
     workDir="$(mktemp -d "${TMPDIR:-/tmp}/routerchat-install.XXXXXX")"
     chmod 700 "$workDir"
-    trap cleanup EXIT INT TERM HUP
 
-    say "Installing RouterChat for $platformName into $installRoot"
+    printf '%s' "$hideCursor"
+    note "Installing RouterChat for $platformName into $installRoot"
 
+    stepStart 1 "Downloading RouterChat${ROUTERCHAT_EXPECTED_VERSION:+ $ROUTERCHAT_EXPECTED_VERSION}"
     downloadApplication
+    stepLabel 1 "Downloading RouterChat $newVersion"
+    stepFinish "done" "$green" "$(megabytes "$(fileBytes "$workDir/routerchat-app.zip")")  100%"
+
+    stepStart 2 "Setting up Python"
     installRuntime
+    if [ "$runtimeWasReady" = "yes" ]; then
+        stepFinish "already set up" "$dim"
+    else
+        stepFinish "done" "$green" "uv $uvVersion + Python $pythonVersion  100%"
+    fi
+
+    detectRunningInstance
+    if [ "$wasRunning" = "yes" ]; then
+        stepStart 3 "Stopping RouterChat and backing up data"
+    else
+        stepStart 3 "Backing up your data"
+    fi
     stopRunningInstance
     if ! backupUserData; then
         restartPreviousInstance
         fail "the existing user data could not be backed up"
     fi
+    if [ -n "$backupDir" ]; then
+        stepFinish "done" "$green"
+    else
+        stepFinish "nothing to back up" "$dim"
+    fi
+
     beginInstallTransaction || fail "the update transaction could not be started"
+
+    stepStart 4 "Installing files"
     installApplication
+    stepFinish "done" "$green"
+
+    stepStart 5 "Installing dependencies"
     syncEnvironment
+    stepFinish "done" "$green" "$packageTotal packages  100%"
+
+    stepStart 6 "Starting RouterChat"
     if ! writeLaunchers; then
         restoreApplication
         fail "the RouterChat launcher files could not be written"
     fi
     createAliases
+    createDesktopShortcut
     startRouterchat
     if ! finishInstallTransaction; then
         stopOwnedInstance || true
@@ -986,9 +1361,11 @@ main() {
         restoreApplication
         fail "install.json could not be written"
     fi
-    discardPreviousApplication || say "The old application cleanup will be retried during the next update."
+    stepFinish "done" "$green"
 
-    say "Done. Start RouterChat later from 'Start RouterChat.command' in $installRoot"
+    discardPreviousApplication || notice "The old application cleanup will be retried during the next update."
+
+    printEnding
 }
 
 main

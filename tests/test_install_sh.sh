@@ -111,7 +111,22 @@ grep -q 'old-database' "$userDataDir/routerchat.sqlite3" || failTest "an interru
 
 resetFixture
 writeLaunchers
+mkdir -p "$HOME/Desktop"
+previousVersion=""
 createAliases
+createDesktopShortcut
+[ "$(readlink "$HOME/Desktop/RouterChat")" = "$HOME/Applications/RouterChat" ] \
+    || failTest "a fresh macOS install did not create the desktop shortcut"
+rm -f "$HOME/Desktop/RouterChat"
+previousVersion="1.0.0"
+createDesktopShortcut
+[ ! -e "$HOME/Desktop/RouterChat" ] || failTest "an update recreated a desktop shortcut the user removed"
+mkdir -p "$HOME/Desktop/RouterChat"
+previousVersion=""
+createDesktopShortcut
+[ ! -L "$HOME/Desktop/RouterChat" ] || failTest "the desktop shortcut replaced an existing RouterChat folder"
+rmdir "$HOME/Desktop/RouterChat"
+createDesktopShortcut
 grep -q 'backend.local_access serve' "$installRoot/Start RouterChat.command" \
     || failTest "the macOS launcher did not use authenticated local access"
 grep -q 'backend.local_access open-browser' "$installRoot/Start RouterChat.command" \
@@ -150,6 +165,7 @@ printf '%s\n' 'saved-database' >"$userDataDir/routerchat.sqlite3"
 printf 'y\ny\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
 [ ! -e "$installRoot" ] || failTest "confirmed uninstall kept the RouterChat installation"
 [ ! -e "$HOME/Applications/RouterChat" ] || failTest "confirmed uninstall kept the macOS launcher aliases"
+[ ! -L "$HOME/Desktop/RouterChat" ] || failTest "confirmed uninstall kept the desktop shortcut"
 backupDatabase="$(find "$HOME/Downloads" -name routerchat.sqlite3 -type f -print | head -n 1)"
 [ -n "$backupDatabase" ] || failTest "the uninstaller did not save the database"
 grep -q 'saved-database' "$backupDatabase" || failTest "the saved database does not match the user data"

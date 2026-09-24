@@ -22,6 +22,68 @@ $script:ownsLock = $false
 $script:validatedAppSum = $null
 $lockPath = Join-Path $InstallRoot 'update.lock'
 
+$script:fancy = -not [Console]::IsOutputRedirected
+$script:checkOpen = $false
+$script:spinTick = 0
+$script:lastTick = [DateTime]::MinValue
+$rightArrow = [string] [char] 0x2192
+
+if ($env:WT_SESSION) {
+    $crossMark = [string] [char] 0x2717
+    $spinnerFrames = @(0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827, 0x2807, 0x280F) | ForEach-Object { [string] [char] $_ }
+}
+else {
+    $crossMark = 'X'
+    $spinnerFrames = @('|', '/', '-', '\')
+}
+
+function Write-CheckPrefix {
+    Write-Host -NoNewline "`rChecking for updates "
+    Write-Host -NoNewline ('.' * 32) -ForegroundColor DarkGray
+}
+
+function Start-Check {
+    $script:checkOpen = $true
+
+    if ($script:fancy) {
+        [Console]::CursorVisible = $false
+        Write-CheckPrefix
+    }
+}
+
+function Update-Check {
+    if (-not $script:checkOpen -or -not $script:fancy) {
+        return
+    }
+
+    if (((Get-Date) - $script:lastTick).TotalMilliseconds -lt 90) {
+        return
+    }
+
+    $script:lastTick = Get-Date
+    $script:spinTick += 1
+    Write-CheckPrefix
+    Write-Host -NoNewline " $($spinnerFrames[$script:spinTick % $spinnerFrames.Count])" -ForegroundColor DarkGray
+}
+
+function Complete-Check {
+    param([string] $Status, [ConsoleColor] $Color)
+
+    if (-not $script:checkOpen) {
+        return
+    }
+
+    if ($script:fancy) {
+        Write-CheckPrefix
+    }
+    else {
+        Write-Host -NoNewline "Checking for updates $('.' * 32)"
+    }
+
+    Write-Host " $Status    " -ForegroundColor $Color
+    $script:checkOpen = $false
+}
+
 function Get-NormalizedVersion {
     param([string] $Value)
     return $Value.Trim() -replace '^v', ''
@@ -115,9 +177,13 @@ function Save-ResponseBody {
 
     $responseStream = $Response.GetResponseStream()
     $fileStream = [System.IO.File]::Create($Destination)
+    $buffer = New-Object byte[] 81920
 
     try {
-        $responseStream.CopyTo($fileStream)
+        while (($readCount = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fileStream.Write($buffer, 0, $readCount)
+            Update-Check
+        }
     }
     finally {
         $fileStream.Dispose()
@@ -327,7 +393,10 @@ function Invoke-Installer {
     }
 }
 
+Write-Host 'RouterChat updater'
+
 try {
+    Start-Check
     Confirm-InstallRoot
 
     New-UpdateLock
@@ -341,25 +410,37 @@ try {
     $latestValue = Get-VersionValue $latestVersion 'The latest stable release'
 
     if ($installedValue -eq $latestValue) {
+        Complete-Check -Status 'up to date' -Color DarkGray
+        Write-Host ''
         Write-Host "RouterChat $installedVersion is already the latest version."
         exit 0
     }
 
     if ($installedValue -gt $latestValue) {
+        Complete-Check -Status 'up to date' -Color DarkGray
+        Write-Host ''
         Write-Host "RouterChat $installedVersion is newer than the latest stable release, so no update was installed."
         exit 0
     }
 
-    Write-Host "Updating RouterChat from $installedVersion to $latestVersion."
     Confirm-LatestPackage -LatestVersion $latestVersion
+    Complete-Check -Status "$latestVersion available" -Color Yellow
+    Write-Host ''
+    Write-Host "Updating RouterChat $installedVersion $rightArrow $latestVersion"
     Invoke-Installer -ExpectedVersion $latestVersion
-    Write-Host "RouterChat was updated to $latestVersion."
 }
 catch {
-    Write-Host "RouterChat update failed: $($_.Exception.Message)"
+    Complete-Check -Status 'failed' -Color Red
+    Write-Host ''
+    Write-Host -NoNewline "$crossMark RouterChat update failed:" -ForegroundColor Red
+    Write-Host " $($_.Exception.Message)"
     exit 1
 }
 finally {
+    if ($script:fancy) {
+        [Console]::CursorVisible = $true
+    }
+
     if ($script:lockStream) {
         $script:lockStream.Dispose()
     }
