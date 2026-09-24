@@ -139,7 +139,7 @@ movingBar() {
     [ "$blockStart" -gt "$travel" ] && blockStart=$((travel * 2 - blockStart))
     blockEnd=$((blockStart + blockSize))
 
-    printf '%s%s%s%s%s%s%s' "$dim" "$(repeatText '░' "$blockStart")" "$blue" "$(repeatText '█' $((blockEnd - blockStart)))" "$dim" "$(repeatText '░' $((barWidth - blockEnd)))" "$reset"
+    printf '%s%s%s%s%s%s%s' "$green$dim" "$(repeatText '░' "$blockStart")" "$blue" "$(repeatText '█' $((blockEnd - blockStart)))" "$green" "$(repeatText '░' $((barWidth - blockEnd)))" "$reset"
 }
 
 megabytes() {
