@@ -149,21 +149,6 @@ function Write-Bar {
     Write-Host -NoNewline ($lightBlock * ($script:barWidth - $filled)) -ForegroundColor DarkGray
 }
 
-function Write-MovingBar {
-    $blockSize = 6
-    $travel = $script:barWidth - $blockSize
-    $elapsed = ((Get-Date) - $script:animationStart).TotalMilliseconds
-    $blockStart = [int] ([Math]::Floor($elapsed * 40 / 1000) % ($travel * 2))
-    if ($blockStart -gt $travel) {
-        $blockStart = $travel * 2 - $blockStart
-    }
-    $blockEnd = $blockStart + $blockSize
-
-    Write-Host -NoNewline ($lightBlock * $blockStart) -ForegroundColor DarkGray
-    Write-Host -NoNewline ($fullBlock * ($blockEnd - $blockStart)) -ForegroundColor Blue
-    Write-Host -NoNewline ($lightBlock * ($script:barWidth - $blockEnd)) -ForegroundColor DarkGray
-}
-
 function Get-FolderSize {
     param([string] $FolderPath)
 
@@ -207,20 +192,17 @@ function Write-ProgressText {
                 Write-Host -NoNewline (' {0} / {1}  {2,3}%' -f (Format-Megabytes $current), (Format-Megabytes $script:progressTotal), $percent)
             }
             else {
-                Write-MovingBar
-                Write-Host -NoNewline (' {0}' -f (Format-Megabytes $script:progressCurrent))
+                Write-Host -NoNewline (Format-Megabytes $script:progressCurrent)
             }
         }
         'growth' {
-            Write-MovingBar
-            Write-Host -NoNewline (' {0}  {1}' -f $script:progressLabel, (Format-Megabytes (Get-FolderSize $script:progressPath)))
+            Write-Host -NoNewline ('{0}  {1}' -f $script:progressLabel, (Format-Megabytes (Get-FolderSize $script:progressPath)))
         }
         'packages' {
             $current = [Math]::Min((Get-InstalledPackageCount), $script:progressTotal)
             if ($current -eq 0) {
                 $downloaded = [Math]::Max(0, (Get-FolderSize $script:progressPath) - $script:progressBase)
-                Write-MovingBar
-                Write-Host -NoNewline (' downloading packages  {0}' -f (Format-Megabytes $downloaded))
+                Write-Host -NoNewline ('downloading packages  {0}' -f (Format-Megabytes $downloaded))
                 break
             }
             $percent = [int] [Math]::Floor(100 * $current / $script:progressTotal)

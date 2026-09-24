@@ -61,7 +61,6 @@ if [ -t 1 ]; then
     green="$(printf '\033[32m')"
     yellow="$(printf '\033[33m')"
     cyan="$(printf '\033[36m')"
-    blue="$(printf '\033[38;5;33m')"
     reset="$(printf '\033[0m')"
     clearLine="$(printf '\033[K')"
     lineUp="$(printf '\033[1A')"
@@ -69,7 +68,7 @@ if [ -t 1 ]; then
     showCursor="$(printf '\033[?25h')"
 else
     fancy="no"
-    bold="" dim="" red="" green="" yellow="" cyan="" blue="" reset="" clearLine="" lineUp="" hideCursor="" showCursor=""
+    bold="" dim="" red="" green="" yellow="" cyan="" reset="" clearLine="" lineUp="" hideCursor="" showCursor=""
 fi
 
 logLine() {
@@ -130,16 +129,6 @@ progressBar() {
     filled=$((barWidth * $1 / $2))
     [ "$filled" -gt "$barWidth" ] && filled="$barWidth"
     printf '%s%s%s%s%s' "$green" "$(repeatText '█' "$filled")" "$dim" "$(repeatText '░' $((barWidth - filled)))" "$reset"
-}
-
-movingBar() {
-    blockSize=6
-    travel=$((barWidth - blockSize))
-    blockStart=$((spinTick * 2 % (travel * 2)))
-    [ "$blockStart" -gt "$travel" ] && blockStart=$((travel * 2 - blockStart))
-    blockEnd=$((blockStart + blockSize))
-
-    printf '%s%s%s%s%s%s%s' "$green$dim" "$(repeatText '░' "$blockStart")" "$blue" "$(repeatText '█' $((blockEnd - blockStart)))" "$green" "$(repeatText '░' $((barWidth - blockEnd)))" "$reset"
 }
 
 megabytes() {
@@ -206,11 +195,11 @@ progressText() {
                 [ "$current" -gt "$progressTotal" ] && current="$progressTotal"
                 printf '%s %s / %s  %3d%%' "$(progressBar "$current" "$progressTotal")" "$(megabytes "$current")" "$(megabytes "$progressTotal")" $((100 * current / progressTotal))
             else
-                printf '%s %s' "$(movingBar)" "$(megabytes "$current")"
+                printf '%s' "$(megabytes "$current")"
             fi
             ;;
         growth)
-            printf '%s %s  %s' "$(movingBar)" "$progressLabel" "$(megabytes "$measuredBytes")"
+            printf '%s  %s' "$progressLabel" "$(megabytes "$measuredBytes")"
             ;;
         packages)
             current="$measuredCount"
@@ -218,7 +207,7 @@ progressText() {
             if [ "$current" -eq 0 ]; then
                 downloaded="$measuredBytes"
                 [ "$downloaded" -lt 0 ] && downloaded=0
-                printf '%s downloading packages  %s' "$(movingBar)" "$(megabytes "$downloaded")"
+                printf 'downloading packages  %s' "$(megabytes "$downloaded")"
                 return 0
             fi
             printf '%s %d / %d packages  %3d%%' "$(progressBar "$current" "$progressTotal")" "$current" "$progressTotal" $((100 * current / progressTotal))
