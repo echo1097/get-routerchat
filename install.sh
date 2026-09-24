@@ -134,10 +134,10 @@ progressBar() {
 
 movingBar() {
     blockSize=6
-    blockEnd=$((spinTick * 3 / 2 % (barWidth + blockSize)))
-    blockStart=$((blockEnd - blockSize))
-    [ "$blockStart" -lt 0 ] && blockStart=0
-    [ "$blockEnd" -gt "$barWidth" ] && blockEnd="$barWidth"
+    travel=$((barWidth - blockSize))
+    blockStart=$((spinTick * 2 % (travel * 2)))
+    [ "$blockStart" -gt "$travel" ] && blockStart=$((travel * 2 - blockStart))
+    blockEnd=$((blockStart + blockSize))
 
     printf '%s%s%s%s%s%s%s' "$dim" "$(repeatText '░' "$blockStart")" "$blue" "$(repeatText '█' $((blockEnd - blockStart)))" "$dim" "$(repeatText '░' $((barWidth - blockEnd)))" "$reset"
 }

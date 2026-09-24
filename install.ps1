@@ -151,10 +151,13 @@ function Write-Bar {
 
 function Write-MovingBar {
     $blockSize = 6
+    $travel = $script:barWidth - $blockSize
     $elapsed = ((Get-Date) - $script:animationStart).TotalMilliseconds
-    $blockEnd = [int] ([Math]::Floor($elapsed * 30 / 1000) % ($script:barWidth + $blockSize))
-    $blockStart = [Math]::Max(0, $blockEnd - $blockSize)
-    $blockEnd = [Math]::Min($script:barWidth, $blockEnd)
+    $blockStart = [int] ([Math]::Floor($elapsed * 40 / 1000) % ($travel * 2))
+    if ($blockStart -gt $travel) {
+        $blockStart = $travel * 2 - $blockStart
+    }
+    $blockEnd = $blockStart + $blockSize
 
     Write-Host -NoNewline ($lightBlock * $blockStart) -ForegroundColor DarkGray
     Write-Host -NoNewline ($fullBlock * ($blockEnd - $blockStart)) -ForegroundColor Blue
