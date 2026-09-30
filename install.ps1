@@ -1,3 +1,6 @@
+$null = New-Module -Name RouterChatInstaller -ScriptBlock {
+Export-ModuleMember
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -2062,8 +2065,9 @@ finally {
     }
 }
 
-if ($script:installFailed) {
-    exit 1
+$global:LASTEXITCODE = if ($script:installFailed) { 1 } else { 0 }
 }
 
-exit 0
+if ($PSCommandPath) {
+    exit $LASTEXITCODE
+}
