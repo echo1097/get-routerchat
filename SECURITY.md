@@ -6,6 +6,6 @@ This repository holds the RouterChat installers, the updater, and the install si
 
 You can also report in the [main repository](https://github.com/echo1097/routerchat/security/advisories/new). Both reach the same maintainer. Private reporting is the only accepted channel, so please do not open a public issue for a security problem.
 
-Never attach `user-data/.env`, which holds your API key, or `user-data/routerchat.sqlite3`, which holds your chats and stories.
+Never attach `user-data/.env`, which holds your API keys, `user-data/routerchat.sqlite3`, which holds your chats and stories, or `user-data/usage.sqlite3`, which holds your usage history.
 
 Full policy: [routerchat/SECURITY.md](https://github.com/echo1097/routerchat/blob/main/SECURITY.md)
