@@ -28,6 +28,7 @@ startupLog=""
 backupDir=""
 hadEnv="no"
 hadDatabase="no"
+hadUsageDatabase="no"
 previousVersion=""
 newVersion=""
 updateMode="no"
@@ -552,10 +553,12 @@ backupUserData() {
     backupDir=""
     hadEnv="no"
     hadDatabase="no"
+    hadUsageDatabase="no"
 
     [ -f "$userDataDir/.env" ] && hadEnv="yes"
     [ -f "$userDataDir/routerchat.sqlite3" ] && hadDatabase="yes"
-    [ "$hadEnv" = "yes" ] || [ "$hadDatabase" = "yes" ] || [ -d "$appDir" ] || return 0
+    [ -f "$userDataDir/usage.sqlite3" ] && hadUsageDatabase="yes"
+    [ "$hadEnv" = "yes" ] || [ "$hadDatabase" = "yes" ] || [ "$hadUsageDatabase" = "yes" ] || [ -d "$appDir" ] || return 0
 
     backupDir="$backupsDir/$(date -u '+%Y%m%d-%H%M%S')-$$"
     mkdir "$backupDir" || return 1
@@ -567,6 +570,9 @@ backupUserData() {
     if [ -f "$userDataDir/routerchat.sqlite3" ]; then
         cp "$userDataDir/routerchat.sqlite3" "$backupDir/routerchat.sqlite3" || return 1
     fi
+    if [ -f "$userDataDir/usage.sqlite3" ]; then
+        cp "$userDataDir/usage.sqlite3" "$backupDir/usage.sqlite3" || return 1
+    fi
 
     note "Saved a backup of your existing RouterChat data."
     trimBackups
@@ -576,6 +582,7 @@ restoreUserData() {
     [ -n "$backupDir" ] && [ -d "$backupDir" ] || return 0
 
     rm -f "$userDataDir/routerchat.sqlite3-wal" "$userDataDir/routerchat.sqlite3-shm"
+    rm -f "$userDataDir/usage.sqlite3-wal" "$userDataDir/usage.sqlite3-shm" "$userDataDir/usage.sqlite3-journal"
 
     if [ "$hadEnv" = "yes" ]; then
         cp "$backupDir/.env" "$userDataDir/.env.restore"
@@ -590,6 +597,13 @@ restoreUserData() {
         mv "$userDataDir/routerchat.sqlite3.restore" "$userDataDir/routerchat.sqlite3"
     else
         rm -f "$userDataDir/routerchat.sqlite3"
+    fi
+
+    if [ "$hadUsageDatabase" = "yes" ]; then
+        cp "$backupDir/usage.sqlite3" "$userDataDir/usage.sqlite3.restore"
+        mv "$userDataDir/usage.sqlite3.restore" "$userDataDir/usage.sqlite3"
+    else
+        rm -f "$userDataDir/usage.sqlite3"
     fi
 
     warn "Restored the previous RouterChat user data."
@@ -620,8 +634,10 @@ loadLatestBackupSnapshot() {
     backupDir="$latestBackup"
     hadEnv="no"
     hadDatabase="no"
+    hadUsageDatabase="no"
     [ -f "$backupDir/.env" ] && hadEnv="yes"
     [ -f "$backupDir/routerchat.sqlite3" ] && hadDatabase="yes"
+    [ -f "$backupDir/usage.sqlite3" ] && hadUsageDatabase="yes"
 }
 
 fileVersion() {
@@ -1051,14 +1067,32 @@ saveUserData() {
     mv "$temporaryDatabase" "$backupDatabase" || return 1
     chmod 600 "$backupDatabase" 2>/dev/null || true
 
+    usageDatabasePath="$userDataDir/usage.sqlite3"
+    if [ -f "$usageDatabasePath" ]; then
+        temporaryUsageDatabase="$backupDir/usage.sqlite3.tmp"
+        backupUsageDatabase="$backupDir/usage.sqlite3"
+
+        if ! "$venvPython" -c "$backupCode" "$usageDatabasePath" "$temporaryUsageDatabase"; then
+            rm -rf "$backupDir"
+            printf 'The RouterChat usage history could not be backed up. Nothing was removed.\n' >&2
+            return 1
+        fi
+
+        mv "$temporaryUsageDatabase" "$backupUsageDatabase" || return 1
+        chmod 600 "$backupUsageDatabase" 2>/dev/null || true
+    fi
+
     cat >"$backupDir/README-userdata.txt" <<'README'
-This SQLite database contains your RouterChat chats and writing data.
+This folder contains your RouterChat data:
+- routerchat.sqlite3 holds your chats and writing.
+- usage.sqlite3 holds your usage and cost history.
 
-To restore it, install RouterChat again, close RouterChat, then replace:
-~/Library/Application Support/RouterChat/user-data/routerchat.sqlite3
+To restore it, install RouterChat again, close RouterChat, then replace
+the files with the same names in:
+~/Library/Application Support/RouterChat/user-data/
 
-with the routerchat.sqlite3 file in this folder before starting RouterChat.
-The database may contain private content, so do not share it publicly.
+with the files in this folder before starting RouterChat.
+These files may contain private content, so do not share them publicly.
 README
 
     chmod 600 "$backupDir/README-userdata.txt" 2>/dev/null || true

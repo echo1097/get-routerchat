@@ -38,6 +38,7 @@ $script:wasRunning = $false
 $script:backupDir = $null
 $script:hadEnv = $false
 $script:hadDatabase = $false
+$script:hadUsageDatabase = $false
 $script:previousVersion = $null
 $script:transactionStarted = $false
 $script:newVersion = $null
@@ -733,13 +734,15 @@ function Sync-PrivateEnvironment {
 
 function Backup-UserData {
     $databasePath = Join-Path $userDataDir 'routerchat.sqlite3'
+    $usageDatabasePath = Join-Path $userDataDir 'usage.sqlite3'
     $envPath = Join-Path $userDataDir '.env'
 
     $script:backupDir = $null
     $script:hadEnv = Test-Path -LiteralPath $envPath
     $script:hadDatabase = Test-Path -LiteralPath $databasePath
+    $script:hadUsageDatabase = Test-Path -LiteralPath $usageDatabasePath
 
-    if (-not $script:hadDatabase -and -not $script:hadEnv -and -not (Test-Path -LiteralPath $appDir)) {
+    if (-not $script:hadDatabase -and -not $script:hadUsageDatabase -and -not $script:hadEnv -and -not (Test-Path -LiteralPath $appDir)) {
         return
     }
 
@@ -747,7 +750,7 @@ function Backup-UserData {
     $script:backupDir = Join-Path $backupsDir $stamp
     New-Item -ItemType Directory -Path $script:backupDir | Out-Null
 
-    foreach ($sourcePath in @($envPath, $databasePath)) {
+    foreach ($sourcePath in @($envPath, $databasePath, $usageDatabasePath)) {
         if (Test-Path -LiteralPath $sourcePath) {
             Copy-Item -LiteralPath $sourcePath -Destination $script:backupDir -Force
         }
@@ -768,9 +771,10 @@ function Restore-UserData {
     }
 
     $databasePath = Join-Path $userDataDir 'routerchat.sqlite3'
+    $usageDatabasePath = Join-Path $userDataDir 'usage.sqlite3'
     $envPath = Join-Path $userDataDir '.env'
 
-    foreach ($sidecarPath in @("$databasePath-wal", "$databasePath-shm")) {
+    foreach ($sidecarPath in @("$databasePath-wal", "$databasePath-shm", "$usageDatabasePath-wal", "$usageDatabasePath-shm", "$usageDatabasePath-journal")) {
         Remove-Item -LiteralPath $sidecarPath -Force -ErrorAction SilentlyContinue
     }
 
@@ -792,6 +796,15 @@ function Restore-UserData {
         Remove-Item -LiteralPath $databasePath -Force -ErrorAction SilentlyContinue
     }
 
+    if ($script:hadUsageDatabase) {
+        $temporaryUsageDatabase = "$usageDatabasePath.restore"
+        Copy-Item -LiteralPath (Join-Path $script:backupDir 'usage.sqlite3') -Destination $temporaryUsageDatabase -Force
+        Move-Item -LiteralPath $temporaryUsageDatabase -Destination $usageDatabasePath -Force
+    }
+    else {
+        Remove-Item -LiteralPath $usageDatabasePath -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Warn 'Restored the previous RouterChat user data.'
 }
 
@@ -808,6 +821,7 @@ function Set-LatestBackupSnapshot {
     $script:backupDir = $latestBackup.FullName
     $script:hadEnv = Test-Path -LiteralPath (Join-Path $script:backupDir '.env')
     $script:hadDatabase = Test-Path -LiteralPath (Join-Path $script:backupDir 'routerchat.sqlite3')
+    $script:hadUsageDatabase = Test-Path -LiteralPath (Join-Path $script:backupDir 'usage.sqlite3')
     return $true
 }
 
@@ -1537,15 +1551,32 @@ function Save-UserData {
 
     Move-Item -LiteralPath $temporaryDatabase -Destination $backupDatabase
 
+    $usageDatabasePath = Join-Path $userDataDir 'usage.sqlite3'
+    if (Test-Path -LiteralPath $usageDatabasePath) {
+        $temporaryUsageDatabase = Join-Path $backupDir 'usage.sqlite3.tmp'
+        $backupUsageDatabase = Join-Path $backupDir 'usage.sqlite3'
+
+        & $venvPython -c $backupCode $usageDatabasePath $temporaryUsageDatabase
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryUsageDatabase)) {
+            Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+            throw 'The RouterChat usage history could not be backed up. Nothing was removed.'
+        }
+
+        Move-Item -LiteralPath $temporaryUsageDatabase -Destination $backupUsageDatabase
+    }
+
     $readmePath = Join-Path $backupDir 'README-userdata.txt'
     $readme = @"
-This SQLite database contains your RouterChat chats and writing data.
+This folder contains your RouterChat data:
+- routerchat.sqlite3 holds your chats and writing.
+- usage.sqlite3 holds your usage and cost history.
 
-To restore it, install RouterChat again, close RouterChat, then replace:
-%LOCALAPPDATA%\RouterChat\user-data\routerchat.sqlite3
+To restore it, install RouterChat again, close RouterChat, then replace
+the files with the same names in:
+%LOCALAPPDATA%\RouterChat\user-data\
 
-with the routerchat.sqlite3 file in this folder before starting RouterChat.
-The database may contain private content, so do not share it publicly.
+with the files in this folder before starting RouterChat.
+These files may contain private content, so do not share them publicly.
 "@
     $withoutBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($readmePath, $readme, $withoutBom)

@@ -29,6 +29,7 @@ resetFixture() {
     backupDir=""
     hadEnv="no"
     hadDatabase="no"
+    hadUsageDatabase="no"
     wasRunning="no"
 }
 
@@ -45,12 +46,15 @@ stageFailedVersion() {
 resetFixture
 printf '%s\n' 'old-env' >"$userDataDir/.env"
 printf '%s\n' 'old-database' >"$userDataDir/routerchat.sqlite3"
+printf '%s\n' 'old-usage' >"$userDataDir/usage.sqlite3"
 backupUserData
 stageFailedVersion
 printf '%s\n' 'changed-env' >"$userDataDir/.env"
 printf '%s\n' 'migrated-database' >"$userDataDir/routerchat.sqlite3"
+printf '%s\n' 'migrated-usage' >"$userDataDir/usage.sqlite3"
 : >"$userDataDir/routerchat.sqlite3-wal"
 restoreApplication
+grep -q 'old-usage' "$userDataDir/usage.sqlite3" || failTest "the previous usage history was not restored"
 grep -q '"1.0.0"' "$appDir/version.json" || failTest "the previous app was not restored"
 grep -q 'old-env' "$userDataDir/.env" || failTest "the previous environment file was not restored"
 grep -q 'old-database' "$userDataDir/routerchat.sqlite3" || failTest "the previous database was not restored"
@@ -61,8 +65,10 @@ backupUserData
 stageFailedVersion
 : >"$userDataDir/.env"
 : >"$userDataDir/routerchat.sqlite3"
+: >"$userDataDir/usage.sqlite3"
 restoreApplication
 [ ! -e "$userDataDir/.env" ] || failTest "rollback kept an environment file that did not exist before"
+[ ! -e "$userDataDir/usage.sqlite3" ] || failTest "rollback kept usage history that did not exist before"
 [ ! -e "$userDataDir/routerchat.sqlite3" ] || failTest "rollback kept a database that did not exist before"
 
 resetFixture
@@ -162,6 +168,7 @@ cp "$3" "$4"
 EOF
 chmod 755 "$venvPython"
 printf '%s\n' 'saved-database' >"$userDataDir/routerchat.sqlite3"
+printf '%s\n' 'saved-usage' >"$userDataDir/usage.sqlite3"
 printf 'y\ny\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
 [ ! -e "$installRoot" ] || failTest "confirmed uninstall kept the RouterChat installation"
 [ ! -e "$HOME/Applications/RouterChat" ] || failTest "confirmed uninstall kept the macOS launcher aliases"
@@ -169,6 +176,9 @@ printf 'y\ny\n' | "$installRoot/Uninstall RouterChat.command" >/dev/null
 backupDatabase="$(find "$HOME/Downloads" -name routerchat.sqlite3 -type f -print | head -n 1)"
 [ -n "$backupDatabase" ] || failTest "the uninstaller did not save the database"
 grep -q 'saved-database' "$backupDatabase" || failTest "the saved database does not match the user data"
+backupUsageDatabase="$(dirname "$backupDatabase")/usage.sqlite3"
+[ -f "$backupUsageDatabase" ] || failTest "the uninstaller did not save the usage history"
+grep -q 'saved-usage' "$backupUsageDatabase" || failTest "the saved usage history does not match the user data"
 backupReadme="$(dirname "$backupDatabase")/README-userdata.txt"
 [ -f "$backupReadme" ] || failTest "the user data README was not created"
 grep -q 'private content' "$backupReadme" || failTest "the user data README is missing its privacy warning"
