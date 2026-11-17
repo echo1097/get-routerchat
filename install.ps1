@@ -1923,12 +1923,460 @@ function Start-Routerchat {
     throw "The new version did not start in time. The previous version was restored. See $failedLog"
 }
 
+$logoSpanRows = @'
+17 70 121 173
+16 74 117 174
+15 76 114 174
+14 78 111 174
+13 80 109 174
+12 82 107 174
+11 83 106 174
+10 84 104 174
+10 85 103 174
+9 87 101 174
+8 88 100 174
+7 88 99 174
+6 89 98 174
+5 90 97 174
+4 91 96 174
+3 91 95 174
+3 92 95 174
+2 174
+1 174
+1 174
+1 174
+1 173
+3 171
+69 123
+71 120
+72 118
+73 116
+74 115
+74 114
+75 113
+75 112
+75 111
+75 110
+76 109
+75 109
+75 108
+75 108
+75 107
+74 107
+74 106
+73 106
+72 106
+71 106
+69 106
+66 106
+9 105
+8 105
+8 105
+8 105
+8 106
+8 106
+8 106
+8 106
+8 106
+8 107
+8 107
+8 108
+8 108
+8 108
+8 83 86 109
+8 81 86 110
+8 79 87 111
+8 77 87 111
+8 74 87 112
+8 72 88 114
+8 73 88 115
+8 33 37 75 89 116
+8 33 38 76 89 118
+8 33 39 77 90 120
+8 33 41 79 90 123
+8 33 42 80 91 171
+8 33 43 81 91 173
+8 33 45 83 92 173
+8 33 46 84 93 174
+8 33 47 85 93 174
+8 33 48 86 94 174
+8 33 49 88 95 174
+8 33 51 89 96 174
+8 33 52 90 97 174
+8 33 53 92 98 174
+8 33 55 93 99 174
+8 33 56 95 100 174
+8 33 57 96 101 174
+8 33 58 97 103 174
+8 33 60 98 104 174
+8 33 61 100 106 174
+8 33 62 101 107 174
+8 33 64 102 109 174
+8 33 65 104 111 174
+8 33 66 105 113 174
+8 32 68 105 115 174
+8 32 69 105 118 173
+9 31 71 104 122 172
+'@ -split "\r?\n"
+
+function Get-LogoInk {
+    $sourceWide = 0
+
+    foreach ($spanRow in $logoSpanRows) {
+        foreach ($value in ($spanRow -split ' ')) {
+            $sourceWide = [Math]::Max($sourceWide, [int] $value + 1)
+        }
+    }
+
+    $inkRows = New-Object 'System.Collections.Generic.List[bool[]]'
+
+    foreach ($spanRow in $logoSpanRows) {
+        $inkRow = New-Object bool[] $sourceWide
+        $values = $spanRow -split ' '
+
+        for ($span = 0; $span -lt $values.Count - 1; $span += 2) {
+            for ($x = [int] $values[$span]; $x -le [int] $values[$span + 1]; $x++) {
+                $inkRow[$x] = $true
+            }
+        }
+
+        $inkRows.Add($inkRow)
+    }
+
+    return @{ rows = $inkRows; wide = $sourceWide; high = $inkRows.Count }
+}
+
+function New-LogoSwirl {
+    param([int] $TermCols, [int] $TermRows, [bool] $RichGlyphs)
+
+    $ink = Get-LogoInk
+    $logoShare = 0.69
+    $marginRows = 3
+    $wordmark = 'R O U T E R C H A T'
+
+    if ($RichGlyphs) {
+        $cellWide = 2
+        $cellHigh = 4
+        $maxLogoDots = 96
+        $dotBits = @(1, 8, 2, 16, 4, 32, 64, 128)
+        $glyphs = 0..255 | ForEach-Object { [string] [char] (0x2800 + $_) }
+    }
+    else {
+        $cellWide = 1
+        $cellHigh = 2
+        $maxLogoDots = 64
+        $dotBits = @(1, 2)
+        $glyphs = @(' ', [string] [char] 0x2580, [string] [char] 0x2584, [string] [char] 0x2588)
+    }
+
+    $scale = [Math]::Min($maxLogoDots / $ink.wide, ($TermCols - 1) * $cellWide * $logoShare / $ink.wide)
+    $scale = [Math]::Min($scale, ($TermRows - 1 - $marginRows * 2) * $cellHigh / $ink.high)
+
+    $logoWide = [int] [Math]::Floor($ink.wide * $scale)
+    $logoHigh = [int] [Math]::Floor($ink.high * $scale)
+
+    if ($logoWide -lt 20 * $cellWide) {
+        return $null
+    }
+
+    $logoCellRows = [int] [Math]::Ceiling($logoHigh / $cellHigh)
+    $canvasRows = $logoCellRows + $marginRows * 2
+    $canvasCols = [int] [Math]::Min($TermCols - 1, [Math]::Round($logoWide / $cellWide / $logoShare))
+    $dotsWide = $canvasCols * $cellWide
+    $dotsHigh = $canvasRows * $cellHigh
+
+    $offsetX = [int] [Math]::Floor(($dotsWide - $logoWide) / 2)
+    $offsetY = $marginRows * $cellHigh
+    $centerX = $offsetX + $logoWide / 2
+    $centerY = $offsetY + $logoHigh / 2
+
+    $homeX = New-Object 'System.Collections.Generic.List[double]'
+    $homeY = New-Object 'System.Collections.Generic.List[double]'
+    $farthest = 1.0
+
+    for ($y = 0; $y -lt $logoHigh; $y++) {
+        $inkRow = $ink.rows[[int] [Math]::Floor(($y + 0.5) * $ink.high / $logoHigh)]
+
+        for ($x = 0; $x -lt $logoWide; $x++) {
+            if (-not $inkRow[[int] [Math]::Floor(($x + 0.5) * $ink.wide / $logoWide)]) {
+                continue
+            }
+
+            $dx = $x + $offsetX - $centerX
+            $dy = $y + $offsetY - $centerY
+            $homeX.Add($dx)
+            $homeY.Add($dy)
+            $farthest = [Math]::Max($farthest, [Math]::Sqrt($dx * $dx + $dy * $dy))
+        }
+    }
+
+    $particleCount = $homeX.Count
+    $unitX = New-Object double[] $particleCount
+    $unitY = New-Object double[] $particleCount
+    $delay = New-Object double[] $particleCount
+    $jitterSource = New-Object System.Random 7
+    $maxDelay = 0.45
+    $maxJitter = 0.08
+
+    for ($i = 0; $i -lt $particleCount; $i++) {
+        $distance = [Math]::Sqrt($homeX[$i] * $homeX[$i] + $homeY[$i] * $homeY[$i])
+
+        if ($distance -gt 0) {
+            $unitX[$i] = $homeX[$i] / $distance
+            $unitY[$i] = $homeY[$i] / $distance
+        }
+
+        $delay[$i] = $maxDelay * $distance / $farthest + $jitterSource.NextDouble() * $maxJitter
+    }
+
+    $motionSteps = 240
+    $stepSettled = New-Object double[] ($motionSteps + 1)
+    $stepGrow = New-Object double[] ($motionSteps + 1)
+    $stepPush = New-Object double[] ($motionSteps + 1)
+    $stepCos = New-Object double[] ($motionSteps + 1)
+    $stepSin = New-Object double[] ($motionSteps + 1)
+
+    for ($step = 0; $step -le $motionSteps; $step++) {
+        $remaining = [Math]::Pow(1 - $step / $motionSteps, 3)
+        $turn = 0.85 * 2 * [Math]::PI * [Math]::Pow($remaining, 1.4)
+
+        $stepSettled[$step] = 1 - $remaining
+        $stepGrow[$step] = 1 + 1.5 * $remaining
+        $stepPush[$step] = $logoWide * 0.14 * $remaining
+        $stepCos[$step] = [Math]::Cos($turn)
+        $stepSin[$step] = [Math]::Sin($turn)
+    }
+
+    return @{
+        canvasCols = $canvasCols
+        canvasRows = $canvasRows
+        cellWide = $cellWide
+        cellHigh = $cellHigh
+        dotsWide = $dotsWide
+        dotsHigh = $dotsHigh
+        dotBits = [int[]] $dotBits
+        glyphs = [string[]] $glyphs
+        centerX = $centerX
+        centerY = $centerY
+        particleCount = $particleCount
+        homeX = $homeX.ToArray()
+        homeY = $homeY.ToArray()
+        unitX = $unitX
+        unitY = $unitY
+        delay = $delay
+        flightSpan = 1 - $maxDelay - $maxJitter
+        motionSteps = $motionSteps
+        stepSettled = $stepSettled
+        stepGrow = $stepGrow
+        stepPush = $stepPush
+        stepCos = $stepCos
+        stepSin = $stepSin
+        cellBits = New-Object int[] ($canvasCols * $canvasRows)
+        cellSettled = New-Object double[] ($canvasCols * $canvasRows)
+        cellCount = New-Object int[] ($canvasCols * $canvasRows)
+        leftPad = ' ' * [int] [Math]::Floor(($TermCols - $canvasCols) / 2)
+        wordmarkText = (' ' * [int] [Math]::Floor(($canvasCols - $wordmark.Length) / 2)) + $wordmark
+        wordmarkRow = $canvasRows - 2
+        frameNumber = 0
+    }
+}
+
+function Update-LogoCells {
+    param([hashtable] $Swirl, [double] $SwirlProgress)
+
+    $cellBits = $Swirl.cellBits
+    $cellSettled = $Swirl.cellSettled
+    $cellCount = $Swirl.cellCount
+    $homeX = $Swirl.homeX
+    $homeY = $Swirl.homeY
+    $unitX = $Swirl.unitX
+    $unitY = $Swirl.unitY
+    $delay = $Swirl.delay
+    $stepSettled = $Swirl.stepSettled
+    $stepGrow = $Swirl.stepGrow
+    $stepPush = $Swirl.stepPush
+    $stepCos = $Swirl.stepCos
+    $stepSin = $Swirl.stepSin
+    $dotBits = $Swirl.dotBits
+    $flightSpan = $Swirl.flightSpan
+    $motionSteps = $Swirl.motionSteps
+    $centerX = $Swirl.centerX + 0.5
+    $centerY = $Swirl.centerY + 0.5
+    $dotsWide = $Swirl.dotsWide
+    $dotsHigh = $Swirl.dotsHigh
+    $cellWide = $Swirl.cellWide
+    $cellHigh = $Swirl.cellHigh
+    $canvasCols = $Swirl.canvasCols
+    $particleCount = $Swirl.particleCount
+
+    [Array]::Clear($cellBits, 0, $cellBits.Length)
+    [Array]::Clear($cellSettled, 0, $cellSettled.Length)
+    [Array]::Clear($cellCount, 0, $cellCount.Length)
+
+    for ($i = 0; $i -lt $particleCount; $i++) {
+        $progress = ($SwirlProgress - $delay[$i]) / $flightSpan
+
+        if ($progress -le 0) {
+            continue
+        }
+
+        if ($progress -gt 1) {
+            $progress = 1
+        }
+
+        $step = [int] [Math]::Floor($progress * $motionSteps)
+        $pullX = $stepGrow[$step] * $homeX[$i] + $stepPush[$step] * $unitX[$i]
+        $pullY = $stepGrow[$step] * $homeY[$i] + $stepPush[$step] * $unitY[$i]
+
+        $x = [int] [Math]::Floor($centerX + $pullX * $stepCos[$step] + $pullY * $stepSin[$step])
+        $y = [int] [Math]::Floor($centerY + $pullY * $stepCos[$step] - $pullX * $stepSin[$step])
+
+        if ($x -lt 0 -or $y -lt 0 -or $x -ge $dotsWide -or $y -ge $dotsHigh) {
+            continue
+        }
+
+        $cell = [int] [Math]::Floor($y / $cellHigh) * $canvasCols + [int] [Math]::Floor($x / $cellWide)
+        $cellBits[$cell] = $cellBits[$cell] -bor $dotBits[($y % $cellHigh) * $cellWide + ($x % $cellWide)]
+        $cellSettled[$cell] += $stepSettled[$step]
+        $cellCount[$cell]++
+    }
+}
+
+function Format-LogoFrame {
+    param([hashtable] $Swirl, [double] $ShineProgress, [int] $WordmarkLevel)
+
+    $escape = [string] [char] 27
+    $flightRamp = @(60, 61, 62, 63, 69, 111, 147, 189, 252)
+    $wordmarkRamp = @(238, 241, 244, 246)
+    $cellBits = $Swirl.cellBits
+    $cellSettled = $Swirl.cellSettled
+    $cellCount = $Swirl.cellCount
+    $glyphs = $Swirl.glyphs
+    $canvasCols = $Swirl.canvasCols
+    $canvasRows = $Swirl.canvasRows
+    $sweep = -0.2 + 1.4 * $ShineProgress
+    $frame = New-Object System.Text.StringBuilder
+
+    if ($Swirl.frameNumber -gt 0) {
+        [void] $frame.Append("$escape[${canvasRows}A")
+    }
+
+    for ($row = 0; $row -lt $canvasRows; $row++) {
+        [void] $frame.Append("`r").Append($Swirl.leftPad)
+
+        if ($row -eq $Swirl.wordmarkRow -and $WordmarkLevel -gt 0) {
+            [void] $frame.Append("$escape[38;5;$($wordmarkRamp[$WordmarkLevel - 1])m").Append($Swirl.wordmarkText).Append("$escape[0m$escape[K`n")
+            continue
+        }
+
+        $lastColor = -1
+
+        for ($col = 0; $col -lt $canvasCols; $col++) {
+            $cell = $row * $canvasCols + $col
+
+            if ($cellBits[$cell] -eq 0) {
+                [void] $frame.Append(' ')
+                continue
+            }
+
+            if ($ShineProgress -ge 0) {
+                $position = ($col + $row * 2) / ($canvasCols + $canvasRows * 2)
+                $glow = [Math]::Exp(-[Math]::Pow(($position - $sweep) / 0.09, 2))
+                $color = if ($glow -gt 0.6) { 231 } elseif ($glow -gt 0.25) { 255 } else { 252 }
+            }
+            else {
+                $level = $cellSettled[$cell] / $cellCount[$cell]
+                $color = $flightRamp[[int] [Math]::Floor($level * $level * 8 + 0.5)]
+            }
+
+            if ($color -ne $lastColor) {
+                [void] $frame.Append("$escape[38;5;${color}m")
+                $lastColor = $color
+            }
+
+            [void] $frame.Append($glyphs[$cellBits[$cell]])
+        }
+
+        [void] $frame.Append("$escape[0m$escape[K`n")
+    }
+
+    $Swirl.frameNumber++
+    return $frame.ToString()
+}
+
+function Show-LogoSwirl {
+    param([bool] $RichGlyphs = $script:richGlyphs)
+
+    if (-not $script:fancy -or -not $Host.UI.SupportsVirtualTerminal) {
+        return
+    }
+
+    $escape = [string] [char] 27
+    $swirlSeconds = 1.9
+    $shineSeconds = 0.7
+    $cursorHidden = $false
+
+    try {
+        $swirl = New-LogoSwirl -TermCols ([Console]::WindowWidth) -TermRows ([Console]::WindowHeight) -RichGlyphs $RichGlyphs
+
+        if (-not $swirl) {
+            return
+        }
+
+        [Console]::Out.Write("$escape[?25l")
+        $cursorHidden = $true
+        $clock = [System.Diagnostics.Stopwatch]::StartNew()
+        $settled = $false
+
+        while ($true) {
+            $frameStart = $clock.Elapsed.TotalSeconds
+
+            if ($frameStart -ge $swirlSeconds + $shineSeconds) {
+                break
+            }
+
+            if ($frameStart -lt $swirlSeconds) {
+                Update-LogoCells -Swirl $swirl -SwirlProgress ($frameStart / $swirlSeconds)
+                [Console]::Out.Write((Format-LogoFrame -Swirl $swirl -ShineProgress -1 -WordmarkLevel 0))
+            }
+            else {
+                if (-not $settled) {
+                    Update-LogoCells -Swirl $swirl -SwirlProgress 1
+                    $settled = $true
+                }
+
+                $shineProgress = ($frameStart - $swirlSeconds) / $shineSeconds
+                $wordmarkLevel = [int] [Math]::Min(4, [Math]::Floor($shineProgress * 6))
+                [Console]::Out.Write((Format-LogoFrame -Swirl $swirl -ShineProgress $shineProgress -WordmarkLevel $wordmarkLevel))
+            }
+
+            $spareMilliseconds = [int] (33 - ($clock.Elapsed.TotalSeconds - $frameStart) * 1000)
+
+            if ($spareMilliseconds -gt 0) {
+                Start-Sleep -Milliseconds $spareMilliseconds
+            }
+        }
+
+        Update-LogoCells -Swirl $swirl -SwirlProgress 1
+        [Console]::Out.Write((Format-LogoFrame -Swirl $swirl -ShineProgress 2 -WordmarkLevel 4))
+    }
+    catch {
+        Write-Log "The logo animation was skipped: $($_.Exception.Message)"
+    }
+    finally {
+        if ($cursorHidden) {
+            [Console]::Out.Write("$escape[0m$escape[?25h")
+        }
+    }
+}
+
 function Write-Header {
     if ($script:updateMode) {
         Write-Terms
         return
     }
 
+    Show-LogoSwirl
     Write-Host 'RouterChat installer'
     Write-Terms
     Write-Host 'Installing RouterChat'
