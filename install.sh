@@ -1313,12 +1313,369 @@ startupFailed() {
     fail "the new version did not start in time. The previous version was restored. See $failedLog"
 }
 
+playLogoSwirl() {
+    [ -t 1 ] || return 0
+    [ "${TERM:-dumb}" != "dumb" ] || return 0
+
+    swirlSize="$( (stty size </dev/tty) 2>/dev/null || true)"
+    swirlRows="${swirlSize%% *}"
+    swirlCols="${swirlSize##* }"
+
+    case "$swirlRows$swirlCols" in
+        ""|*[!0-9]*)
+            swirlRows="$(tput lines 2>/dev/null || echo 24)"
+            swirlCols="$(tput cols 2>/dev/null || echo 80)"
+            ;;
+    esac
+
+    (
+        trap 'printf "\033[?25h\033[0m"' EXIT
+        trap 'exit 130' INT TERM
+        printf '\033[?25l'
+
+        LC_ALL=C awk -v termCols="$swirlCols" -v termRows="$swirlRows" '
+function smaller(a, b) {
+    return a < b ? a : b
+}
+
+function hasInk(sourceX, sourceY,    span) {
+    for (span = 1; span < spanCount[sourceY]; span += 2) {
+        if (sourceX >= spans[sourceY, span] && sourceX <= spans[sourceY, span + 1]) return 1
+    }
+
+    return 0
+}
+
+function fitToTerminal(    scale, logoCellRows) {
+    scale = smaller(maxLogoDots / sourceWide, (termCols - 1) * 2 * logoShare / sourceWide)
+    scale = smaller(scale, (termRows - 1 - marginRows * 2) * 4 / sourceHigh)
+
+    logoWide = int(sourceWide * scale)
+    logoHigh = int(sourceHigh * scale)
+
+    if (logoWide < minLogoDots) return 0
+
+    logoCellRows = int((logoHigh + 3) / 4)
+    canvasRows = logoCellRows + marginRows * 2
+    canvasCols = smaller(termCols - 1, int(logoWide / 2 / logoShare + 0.5))
+    dotsWide = canvasCols * 2
+    dotsHigh = canvasRows * 4
+    wordmarkRow = canvasRows - 2
+
+    offsetX = int((dotsWide - logoWide) / 2)
+    offsetY = marginRows * 4
+    centerX = offsetX + logoWide / 2
+    centerY = offsetY + logoHigh / 2
+    pushOut = logoWide * 0.14
+
+    leftPad = sprintf("%" int((termCols - canvasCols) / 2) "s", "")
+    wordmarkText = sprintf("%" int((canvasCols - length(wordmark)) / 2) "s%s", "", wordmark)
+
+    return 1
+}
+
+function buildParticles(    x, y, dx, dy, distance, farthest, i) {
+    farthest = 1
+
+    for (y = 0; y < logoHigh; y++) {
+        for (x = 0; x < logoWide; x++) {
+            if (!hasInk(int((x + 0.5) * sourceWide / logoWide), int((y + 0.5) * sourceHigh / logoHigh) + 1)) continue
+
+            dx = x + offsetX - centerX
+            dy = y + offsetY - centerY
+            distance = sqrt(dx * dx + dy * dy)
+
+            particleCount++
+            homeX[particleCount] = dx
+            homeY[particleCount] = dy
+            unitX[particleCount] = distance > 0 ? dx / distance : 0
+            unitY[particleCount] = distance > 0 ? dy / distance : 0
+            reach[particleCount] = distance
+
+            if (distance > farthest) farthest = distance
+        }
+    }
+
+    for (i = 1; i <= particleCount; i++) {
+        delay[i] = maxDelay * reach[i] / farthest + rand() * maxJitter
+    }
+}
+
+function buildMotionTable(    step, progress, settled, remaining, turn) {
+    for (step = 0; step <= motionSteps; step++) {
+        progress = step / motionSteps
+        settled = 1 - (1 - progress) ^ 3
+        remaining = 1 - settled
+        turn = swirlTurns * 6.2831853 * remaining ^ 1.4
+
+        stepSettled[step] = settled
+        stepGrow[step] = 1 + spreadAmount * remaining
+        stepPush[step] = pushOut * remaining
+        stepCos[step] = cos(turn)
+        stepSin[step] = sin(turn)
+    }
+}
+
+function buildFrame(swirlProgress,    i, progress, step, pullX, pullY, x, y, key) {
+    split("", cellBits)
+    split("", cellSettled)
+    split("", cellCount)
+    split("", dotSeen)
+
+    for (i = 1; i <= particleCount; i++) {
+        progress = (swirlProgress - delay[i]) / flightSpan
+
+        if (progress <= 0) continue
+        if (progress > 1) progress = 1
+
+        step = int(progress * motionSteps)
+        pullX = stepGrow[step] * homeX[i] + stepPush[step] * unitX[i]
+        pullY = stepGrow[step] * homeY[i] + stepPush[step] * unitY[i]
+
+        x = int(centerX + pullX * stepCos[step] + pullY * stepSin[step] + 0.5)
+        y = int(centerY + pullY * stepCos[step] - pullX * stepSin[step] + 0.5)
+
+        if (x < 0 || y < 0 || x >= dotsWide || y >= dotsHigh) continue
+
+        key = int(x / 2) "," int(y / 4)
+        cellSettled[key] += stepSettled[step]
+        cellCount[key]++
+
+        if ((x, y) in dotSeen) continue
+
+        dotSeen[x, y] = 1
+        cellBits[key] += dotBit[y % 4, x % 2]
+    }
+}
+
+function cellColor(col, row, key, shineProgress,    level, position, glow) {
+    if (shineProgress >= 0) {
+        position = (col + row * 2) / (canvasCols + canvasRows * 2)
+        glow = exp(-((position - (-0.2 + 1.4 * shineProgress)) / 0.09) ^ 2)
+
+        if (glow > 0.6) return 231
+        if (glow > 0.25) return 255
+        return restColor
+    }
+
+    level = cellSettled[key] / cellCount[key]
+    return flightRamp[int(level * level * 8 + 0.5) + 1]
+}
+
+function drawFrame(shineProgress, wordmarkLevel,    row, col, key, color, lastColor, out) {
+    out = frameNumber > 0 ? "\033[" canvasRows "A" : ""
+
+    for (row = 0; row < canvasRows; row++) {
+        out = out "\r" leftPad
+
+        if (row == wordmarkRow && wordmarkLevel > 0) {
+            out = out "\033[38;5;" wordmarkRamp[wordmarkLevel] "m" wordmarkText "\033[0m\033[K\n"
+            continue
+        }
+
+        lastColor = -1
+
+        for (col = 0; col < canvasCols; col++) {
+            key = col "," row
+
+            if (!(key in cellBits)) {
+                out = out " "
+                continue
+            }
+
+            color = cellColor(col, row, key, shineProgress)
+
+            if (color != lastColor) {
+                out = out "\033[38;5;" color "m"
+                lastColor = color
+            }
+
+            out = out braille[cellBits[key]]
+        }
+
+        out = out "\033[0m\033[K\n"
+    }
+
+    printf "%s", out
+    fflush()
+    system("sleep " framePause)
+    frameNumber++
+}
+
+BEGIN {
+    maxLogoDots = 132
+    minLogoDots = 40
+    logoShare = 0.69
+    marginRows = 3
+    wordmark = "R O U T E R C H A T"
+
+    swirlFrames = 38
+    shineFrames = 14
+    swirlTurns = 0.85
+    spreadAmount = 1.5
+    maxDelay = 0.45
+    maxJitter = 0.08
+    flightSpan = 1 - maxDelay - maxJitter
+    motionSteps = 240
+    restColor = 252
+
+    split("60 61 62 63 69 111 147 189 252", flightRamp, " ")
+    split("238 241 244 246", wordmarkRamp, " ")
+
+    dotBit[0, 0] = 1;  dotBit[0, 1] = 8
+    dotBit[1, 0] = 2;  dotBit[1, 1] = 16
+    dotBit[2, 0] = 4;  dotBit[2, 1] = 32
+    dotBit[3, 0] = 64; dotBit[3, 1] = 128
+
+    for (bits = 0; bits < 256; bits++) {
+        braille[bits] = sprintf("%c%c%c", 226, 160 + int(bits / 64), 128 + bits % 64)
+    }
+
+    srand(7)
+}
+
+{
+    spanCount[NR] = split($0, rowSpans, " ")
+
+    for (span = 1; span <= spanCount[NR]; span++) {
+        spans[NR, span] = rowSpans[span]
+
+        if (rowSpans[span] + 1 > sourceWide) sourceWide = rowSpans[span] + 1
+    }
+}
+
+END {
+    sourceHigh = NR
+
+    if (!fitToTerminal()) exit
+
+    buildParticles()
+    buildMotionTable()
+
+    framePause = 0.034 - particleCount * 0.0000025
+    if (framePause < 0.004) framePause = 0.004
+
+    for (frame = 1; frame <= swirlFrames; frame++) {
+        buildFrame(frame / swirlFrames)
+        drawFrame(-1, 0)
+    }
+
+    for (frame = 1; frame <= shineFrames; frame++) {
+        wordmarkLevel = int(frame / shineFrames * 6)
+        if (wordmarkLevel > 4) wordmarkLevel = 4
+
+        drawFrame(frame / shineFrames, wordmarkLevel)
+    }
+
+    drawFrame(2, 4)
+}
+' <<'LOGO'
+
+17 70 121 173
+16 74 117 174
+15 76 114 174
+14 78 111 174
+13 80 109 174
+12 82 107 174
+11 83 106 174
+10 84 104 174
+10 85 103 174
+9 87 101 174
+8 88 100 174
+7 88 99 174
+6 89 98 174
+5 90 97 174
+4 91 96 174
+3 91 95 174
+3 92 95 174
+2 174
+1 174
+1 174
+1 174
+1 173
+3 171
+69 123
+71 120
+72 118
+73 116
+74 115
+74 114
+75 113
+75 112
+75 111
+75 110
+76 109
+75 109
+75 108
+75 108
+75 107
+74 107
+74 106
+73 106
+72 106
+71 106
+69 106
+66 106
+9 105
+8 105
+8 105
+8 105
+8 106
+8 106
+8 106
+8 106
+8 106
+8 107
+8 107
+8 108
+8 108
+8 108
+8 83 86 109
+8 81 86 110
+8 79 87 111
+8 77 87 111
+8 74 87 112
+8 72 88 114
+8 73 88 115
+8 33 37 75 89 116
+8 33 38 76 89 118
+8 33 39 77 90 120
+8 33 41 79 90 123
+8 33 42 80 91 171
+8 33 43 81 91 173
+8 33 45 83 92 173
+8 33 46 84 93 174
+8 33 47 85 93 174
+8 33 48 86 94 174
+8 33 49 88 95 174
+8 33 51 89 96 174
+8 33 52 90 97 174
+8 33 53 92 98 174
+8 33 55 93 99 174
+8 33 56 95 100 174
+8 33 57 96 101 174
+8 33 58 97 103 174
+8 33 60 98 104 174
+8 33 61 100 106 174
+8 33 62 101 107 174
+8 33 64 102 109 174
+8 33 65 104 111 174
+8 33 66 105 113 174
+8 32 68 105 115 174
+8 32 69 105 118 173
+9 31 71 104 122 172
+
+LOGO
+    ) || true
+}
+
 printHeader() {
     if [ "$updateMode" = "yes" ]; then
         printTerms
         return 0
     fi
 
+    playLogoSwirl
     printf '%sRouterChat installer%s\n' "$bold" "$reset"
     printTerms
     printf '%sInstalling RouterChat%s\n\n' "$bold" "$reset"
